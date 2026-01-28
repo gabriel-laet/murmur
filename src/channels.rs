@@ -1,11 +1,10 @@
 use std::fs;
 
-const SOCKET_DIR: &str = "/tmp";
 const PREFIX: &str = "murmur-";
 const SUFFIX: &str = ".sock";
 
 pub fn ls() -> anyhow::Result<()> {
-    for entry in fs::read_dir(SOCKET_DIR)? {
+    for entry in fs::read_dir(crate::socket::get_socket_dir())? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();

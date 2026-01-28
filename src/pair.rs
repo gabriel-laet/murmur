@@ -24,7 +24,7 @@ pub async fn run(channel: &str) -> anyhow::Result<()> {
 async fn duplex(stream: UnixStream) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
 
-    // socket → stdout
+    // socket → stdout (this is the primary task - exit when socket closes)
     let read_task = tokio::spawn(async move {
         let mut buf_reader = BufReader::new(reader);
         let mut line = String::new();
@@ -39,8 +39,8 @@ async fn duplex(stream: UnixStream) -> anyhow::Result<()> {
         }
     });
 
-    // stdin → socket
-    let write_task = tokio::spawn(async move {
+    // stdin → socket (secondary - don't exit if stdin closes, just stop writing)
+    tokio::spawn(async move {
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);
         let mut line = String::new();
@@ -56,13 +56,11 @@ async fn duplex(stream: UnixStream) -> anyhow::Result<()> {
                 }
             }
         }
+        // stdin closed but we keep running - peer might still send data
     });
 
-    // Exit when either side closes
-    tokio::select! {
-        _ = read_task => {}
-        _ = write_task => {}
-    }
+    // Only exit when socket closes (read task ends)
+    read_task.await?;
 
     Ok(())
 }

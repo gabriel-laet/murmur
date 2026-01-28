@@ -1,13 +1,30 @@
 use crate::error::MurmurError;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 
-const SOCKET_DIR: &str = "/tmp";
+/// Get the socket directory, canonicalized to avoid symlink issues.
+/// On macOS, /tmp is a symlink to /private/tmp - using both paths causes agents
+/// to not find each other's sockets. We resolve once at startup.
+fn socket_dir() -> &'static str {
+    static SOCKET_DIR: OnceLock<String> = OnceLock::new();
+    SOCKET_DIR.get_or_init(|| {
+        // Try to canonicalize /tmp to get the real path
+        std::fs::canonicalize("/tmp")
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "/tmp".to_string())
+    })
+}
 
 pub fn socket_path(channel: &str) -> Result<PathBuf, MurmurError> {
     validate_channel(channel)?;
-    Ok(PathBuf::from(format!("{}/murmur-{}.sock", SOCKET_DIR, channel)))
+    Ok(PathBuf::from(format!("{}/murmur-{}.sock", socket_dir(), channel)))
+}
+
+/// Returns the socket directory path (for use by other modules like channels.rs)
+pub fn get_socket_dir() -> &'static str {
+    socket_dir()
 }
 
 fn validate_channel(channel: &str) -> Result<(), MurmurError> {

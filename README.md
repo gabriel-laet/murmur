@@ -8,9 +8,25 @@ Dead-simple local IPC for AI agents. Unix sockets, newline-delimited messages. N
 cargo install --path .
 ```
 
+## Quick Start
+
+```bash
+# Start a channel (first caller becomes server, stays running)
+murmur mychannel
+
+# In another terminal, send messages
+murmur send mychannel "hello from agent-1"
+murmur send mychannel "another message"
+```
+
+The `murmur <channel>` command prints instructions for other agents and handles everything automatically.
+
 ## Usage
 
 ```bash
+# Connect to a channel (server mode if first, client mode if exists)
+murmur mychannel
+
 # Listen on a channel (prints incoming messages to stdout, blocks)
 murmur listen mychannel
 
@@ -23,15 +39,11 @@ murmur send --no-wait mychannel "hello"
 # Send and wait for a reply (one line back)
 murmur send --reply mychannel '{"cmd": "status"}'
 
-# Combine: wait for listener + get reply
-murmur send --reply mychannel "ping"
-
 # Pipe stdin
 echo '{"task": "summarize", "id": 42}' | murmur send mychannel
 
-# Bidirectional duplex (first caller binds, second connects)
-murmur pair chat    # terminal 1 — binds, waits for peer
-murmur pair chat    # terminal 2 — connects, both sides talk
+# Bidirectional 1:1 duplex (first caller binds, second connects, both exit on close)
+murmur pair chat
 
 # Pub/sub broadcast
 murmur pub feed          # reads stdin, broadcasts to all subscribers
@@ -44,20 +56,23 @@ murmur rm mychannel      # remove a channel socket
 
 ## Examples
 
-Two agents talking:
+### Agent-to-agent communication (recommended)
 
 ```bash
-# Terminal 1 - agent listens for work
-murmur listen tasks | while read -r msg; do
-  echo "got: $msg"
-done
+# Terminal 1 - start a channel
+murmur work
+# Prints instructions, waits for connections, stays running
 
-# Terminal 2 - coordinator sends work (waits for listener)
-murmur send tasks "summarize document.pdf"
-murmur send tasks "translate output to french"
+# Terminal 2 - send messages (can connect/disconnect multiple times)
+murmur send work "summarize document.pdf"
+murmur send work "translate output to french"
+
+# Or join for bidirectional chat
+murmur work
+# Now both sides can send/receive
 ```
 
-Request/reply pattern:
+### Request/reply pattern
 
 ```bash
 # Terminal 1 - agent listens and replies
@@ -68,7 +83,7 @@ RESULT=$(murmur send --reply tasks '{"cmd": "summarize", "file": "doc.pdf"}')
 echo "Agent replied: $RESULT"
 ```
 
-Bidirectional duplex:
+### 1:1 Bidirectional duplex
 
 ```bash
 # Terminal 1
@@ -77,9 +92,10 @@ murmur pair chat
 # Terminal 2
 murmur pair chat
 # Now both sides: stdin → socket, socket → stdout
+# Exits when either side disconnects
 ```
 
-Fan-out to multiple workers:
+### Fan-out to multiple workers
 
 ```bash
 # Publisher
@@ -92,7 +108,7 @@ murmur sub events | worker-2
 
 ## Protocol
 
-- Transport: Unix domain sockets at `/tmp/murmur-<channel>.sock`
+- Transport: Unix domain sockets at `/tmp/murmur-<channel>.sock` (canonicalized to `/private/tmp` on macOS)
 - Framing: newline-delimited (`\n` terminated)
 - Max message size: 1 MB
 - Encoding: opaque bytes — use text, JSON, base64, whatever you want

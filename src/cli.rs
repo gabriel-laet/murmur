@@ -4,26 +4,31 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "murmur",
     about = "Dead-simple local IPC for AI agents. Unix sockets, newline-delimited messages.",
+    args_conflicts_with_subcommands = true,
     after_long_help = r#"CHEAT SHEET:
+  murmur ch                        # connect to channel (prints instructions, then bidirectional I/O)
   murmur listen ch                 # binds socket, prints incoming messages to stdout (blocks)
   murmur send ch "msg"             # sends (retries for 5s if listener isn't up yet)
   murmur send --no-wait ch "msg"   # fail immediately if listener isn't up
   murmur send --reply ch "msg"     # sends, waits for one line back, prints to stdout
   murmur pair ch                   # bidirectional duplex — first caller binds, second connects
-  echo '{"j":1}' | murmur send ch # pipe stdin as message
+  echo '{"j":1}' | murmur send ch  # pipe stdin as message
   murmur pub ch                    # reads stdin lines, broadcasts to all subscribers
   murmur sub ch                    # subscribes and prints broadcast lines to stdout
   murmur ls                        # list active channel names
   murmur rm ch                     # delete a channel socket file
 
 PROTOCOL:
-  Socket path: /tmp/murmur-<channel>.sock
+  Socket path: /tmp/murmur-<channel>.sock  (canonicalized on macOS to /private/tmp)
   Framing:     newline-delimited (\n)
   Max message: 1 MB"#
 )]
 pub struct Cli {
+    /// Channel to connect to (shorthand for bidirectional pair mode with instructions)
+    pub channel: Option<String>,
+
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -72,7 +77,7 @@ pub enum Command {
     /// Example: murmur sub events
     Sub { channel: String },
 
-    /// List active channel names (one per line) by scanning /tmp/murmur-*.sock.
+    /// List active channel names (one per line) by scanning for murmur-*.sock files.
     /// Does not block.
     Ls,
 
