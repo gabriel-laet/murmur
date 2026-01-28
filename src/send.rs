@@ -13,7 +13,13 @@ pub async fn run(
         socket::connect_with_retry(channel, timeout).await?
     } else {
         let path = socket::socket_path(channel)?;
-        UnixStream::connect(&path).await?
+        UnixStream::connect(&path).await.map_err(|_| {
+            anyhow::anyhow!(
+                "no listener on channel '{}'. Start one with: murmur listen {}",
+                channel,
+                channel
+            )
+        })?
     };
 
     match msg {

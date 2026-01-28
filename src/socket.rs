@@ -25,6 +25,14 @@ fn validate_channel(channel: &str) -> Result<(), MurmurError> {
 pub fn bind(channel: &str) -> anyhow::Result<UnixListener> {
     let path = socket_path(channel)?;
     if path.exists() {
+        // Check if a listener is already active by trying to connect
+        if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+            anyhow::bail!(
+                "channel '{}' already has an active listener. To send messages, use: murmur send {} \"your message\". To remove the existing listener first: murmur rm {}",
+                channel, channel, channel
+            );
+        }
+        // Stale socket file — safe to remove
         std::fs::remove_file(&path)?;
     }
     let listener = UnixListener::bind(&path)?;
@@ -44,13 +52,13 @@ pub async fn connect_with_retry(channel: &str, timeout_secs: u64) -> anyhow::Res
     loop {
         match UnixStream::connect(&path).await {
             Ok(stream) => return Ok(stream),
-            Err(e) => {
+            Err(_e) => {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(anyhow::anyhow!(
-                        "timeout after {}s waiting for channel '{}': {}",
+                        "timeout after {}s waiting for channel '{}'. Start a listener with: murmur listen {}",
                         timeout_secs,
                         channel,
-                        e
+                        channel
                     ));
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
