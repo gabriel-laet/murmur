@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand};
     about = "Dead-simple local IPC for AI agents. Unix sockets, newline-delimited messages.",
     after_long_help = r#"CHEAT SHEET:
   murmur listen ch                 # binds socket, prints incoming messages to stdout (blocks)
-  murmur send ch "msg"             # connects and sends one message, then exits
-  murmur send --wait ch "msg"      # retries until listener is up (default 5s timeout)
+  murmur send ch "msg"             # sends (retries for 5s if listener isn't up yet)
+  murmur send --no-wait ch "msg"   # fail immediately if listener isn't up
   murmur send --reply ch "msg"     # sends, waits for one line back, prints to stdout
   murmur pair ch                   # bidirectional duplex — first caller binds, second connects
   echo '{"j":1}' | murmur send ch # pipe stdin as message
@@ -34,6 +34,7 @@ pub enum Command {
     Listen { channel: String },
 
     /// Connect to <channel> and send a message. Reads stdin if <message> is omitted.
+    /// By default, retries connecting for up to 5s so you never need sleep hacks.
     /// Exits after sending unless --reply is set.
     /// Example: murmur send work "hello"
     Send {
@@ -41,12 +42,11 @@ pub enum Command {
         /// Message to send (reads stdin if omitted)
         message: Option<String>,
 
-        /// Retry connecting every 50ms until the channel socket exists and accepts.
-        /// Useful when the listener hasn't started yet — eliminates sleep hacks.
-        #[arg(short, long)]
-        wait: bool,
+        /// Fail immediately if the channel socket is not available, instead of retrying.
+        #[arg(long)]
+        no_wait: bool,
 
-        /// Max seconds to wait when --wait is set. Default: 5
+        /// Max seconds to wait for the channel to become available. Default: 5
         #[arg(short, long, default_value = "5")]
         timeout: u64,
 

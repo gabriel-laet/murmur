@@ -19,10 +19,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Send {
             channel,
             message,
-            wait,
+            no_wait,
             timeout,
             reply,
-        } => send::run(&channel, message, wait, timeout, reply).await,
+        } => send::run(&channel, message, !no_wait, timeout, reply).await,
         Command::Pair { channel } => pair::run(&channel).await,
         Command::Pub { channel } => pubsub::run_pub(&channel).await,
         Command::Sub { channel } => pubsub::run_sub(&channel).await,

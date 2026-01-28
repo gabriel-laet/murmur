@@ -14,17 +14,17 @@ cargo install --path .
 # Listen on a channel (prints incoming messages to stdout, blocks)
 murmur listen mychannel
 
-# Send a message
+# Send a message (retries for up to 5s if listener isn't up yet)
 murmur send mychannel "hello from agent-1"
 
-# Wait for listener to come up (retries every 50ms, 5s default timeout)
-murmur send --wait mychannel "hello"
+# Fail immediately if listener isn't up (no retry)
+murmur send --no-wait mychannel "hello"
 
 # Send and wait for a reply (one line back)
 murmur send --reply mychannel '{"cmd": "status"}'
 
 # Combine: wait for listener + get reply
-murmur send --wait --reply mychannel "ping"
+murmur send --reply mychannel "ping"
 
 # Pipe stdin
 echo '{"task": "summarize", "id": 42}' | murmur send mychannel
@@ -53,8 +53,8 @@ murmur listen tasks | while read -r msg; do
 done
 
 # Terminal 2 - coordinator sends work (waits for listener)
-murmur send --wait tasks "summarize document.pdf"
-murmur send --wait tasks "translate output to french"
+murmur send tasks "summarize document.pdf"
+murmur send tasks "translate output to french"
 ```
 
 Request/reply pattern:
@@ -64,7 +64,7 @@ Request/reply pattern:
 murmur listen tasks  # handle connections that expect replies in your app
 
 # Terminal 2 - send and get reply
-RESULT=$(murmur send --wait --reply tasks '{"cmd": "summarize", "file": "doc.pdf"}')
+RESULT=$(murmur send --reply tasks '{"cmd": "summarize", "file": "doc.pdf"}')
 echo "Agent replied: $RESULT"
 ```
 
