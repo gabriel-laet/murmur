@@ -55,19 +55,23 @@ async fn run_as_server(channel: &str) -> anyhow::Result<()> {
                 Ok((stream, _)) => {
                     eprintln!("peer connected");
                     let mut rx = tx_for_accept.subscribe();
+                    let tx_for_peer = tx_for_accept.clone();
 
                     tokio::spawn(async move {
                         let (reader, mut writer) = stream.into_split();
 
-                        // Task to read from peer and print to stdout
+                        // Task to read from peer and broadcast to all (including server stdout)
                         let read_handle = tokio::spawn(async move {
                             let _ = message::read_messages(reader, |msg| {
+                                // Print to server stdout
                                 println!("{}", msg);
+                                // Broadcast to all peers (including sender, they can ignore)
+                                let _ = tx_for_peer.send(format!("{}\n", msg));
                             })
                             .await;
                         });
 
-                        // Task to send broadcast messages to peer
+                        // Task to send broadcast messages to this peer
                         let write_handle = tokio::spawn(async move {
                             while let Ok(msg) = rx.recv().await {
                                 if writer.write_all(msg.as_bytes()).await.is_err() {
@@ -143,26 +147,24 @@ fn print_server_instructions(channel: &str) {
         .unwrap_or_else(|_| format!("/tmp/murmur-{}.sock", channel));
 
     eprintln!(
-        r#"murmur channel "{}" ready (server mode)
+        r#"murmur channel "{}" ready (hosting)
 
-Other agents can connect with:
-  murmur {}                               # bidirectional
+Other agents connect with:
+  murmur {}                               # join channel (N peers supported)
   murmur send {} "message"                # send one message
-  murmur send --reply {} "question"       # send and wait for response
   echo "msg" | nc -U {}     # raw socket
 
-Protocol: newline-delimited, 1MB max. Messages appear on stdout.
+All messages are broadcast to all connected peers.
 ---"#,
-        channel, channel, channel, channel, socket_path
+        channel, channel, channel, socket_path
     );
 }
 
 fn print_client_instructions(channel: &str) {
     eprintln!(
-        r#"murmur channel "{}" connected (client mode)
+        r#"murmur channel "{}" connected
 
-Bidirectional: stdin -> server, server -> stdout
-Type messages and press Enter to send. Ctrl+C to disconnect.
+Messages from any peer appear on stdout. Your stdin broadcasts to all.
 ---"#,
         channel
     );
