@@ -5,33 +5,57 @@ use tokio::signal;
 use tokio::sync::broadcast;
 
 pub async fn run(channel: &str) -> anyhow::Result<()> {
-    let path = socket::socket_path(channel)?;
+    loop {
+        let path = socket::socket_path(channel)?;
 
-    // Clean up stale socket if needed
-    if path.exists() {
-        if std::os::unix::net::UnixStream::connect(&path).is_ok() {
-            // Active listener exists - connect as client
-            return run_as_client(channel).await;
+        // Try to connect to existing host
+        if path.exists() {
+            if let Ok(stream) = UnixStream::connect(&path).await {
+                eprintln!("connected to channel \"{}\"", channel);
+                print_peer_instructions(channel);
+
+                match run_as_peer(stream).await {
+                    Ok(_) => {
+                        eprintln!("host disconnected, attempting to become new host...");
+                        // Small delay to avoid race with other peers
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        continue; // Try to become host or reconnect
+                    }
+                    Err(e) => {
+                        eprintln!("connection error: {}", e);
+                        continue;
+                    }
+                }
+            }
+            // Socket exists but can't connect - stale, remove it
+            let _ = std::fs::remove_file(&path);
         }
-        // Stale socket - remove it
-        std::fs::remove_file(&path)?;
-    }
 
-    // No existing listener - become the server
-    run_as_server(channel).await
+        // No host exists - become the host
+        match socket::bind(channel) {
+            Ok(listener) => {
+                eprintln!("hosting channel \"{}\"", channel);
+                print_host_instructions(channel);
+                run_as_host(channel, listener).await?;
+                return Ok(()); // Host exited cleanly (Ctrl+C)
+            }
+            Err(_) => {
+                // Another peer became host, retry as client
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        }
+    }
 }
 
-async fn run_as_server(channel: &str) -> anyhow::Result<()> {
-    let listener = socket::bind(channel)?;
+async fn run_as_host(channel: &str, listener: tokio::net::UnixListener) -> anyhow::Result<()> {
     let channel_name = channel.to_string();
 
-    print_server_instructions(channel);
-
-    // Channel for broadcasting stdin to all connected peers
+    // Channel for broadcasting to all peers
     let (tx, _) = broadcast::channel::<String>(100);
     let tx_clone = tx.clone();
 
-    // Stdin reader task - reads stdin and broadcasts to all peers
+    // Stdin reader task - broadcasts to all peers
     tokio::spawn(async move {
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);
@@ -60,18 +84,16 @@ async fn run_as_server(channel: &str) -> anyhow::Result<()> {
                     tokio::spawn(async move {
                         let (reader, mut writer) = stream.into_split();
 
-                        // Task to read from peer and broadcast to all (including server stdout)
+                        // Read from peer, broadcast to all
                         let read_handle = tokio::spawn(async move {
                             let _ = message::read_messages(reader, |msg| {
-                                // Print to server stdout
                                 println!("{}", msg);
-                                // Broadcast to all peers (including sender, they can ignore)
                                 let _ = tx_for_peer.send(format!("{}\n", msg));
                             })
                             .await;
                         });
 
-                        // Task to send broadcast messages to this peer
+                        // Send broadcasts to this peer
                         let write_handle = tokio::spawn(async move {
                             while let Ok(msg) = rx.recv().await {
                                 if writer.write_all(msg.as_bytes()).await.is_err() {
@@ -81,7 +103,6 @@ async fn run_as_server(channel: &str) -> anyhow::Result<()> {
                             }
                         });
 
-                        // Wait for read to finish (peer disconnected)
                         let _ = read_handle.await;
                         write_handle.abort();
                         eprintln!("peer disconnected");
@@ -101,20 +122,15 @@ async fn run_as_server(channel: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_as_client(channel: &str) -> anyhow::Result<()> {
-    let path = socket::socket_path(channel)?;
-    let stream = UnixStream::connect(&path).await?;
-
-    print_client_instructions(channel);
-
+async fn run_as_peer(stream: UnixStream) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
 
     // socket → stdout
     let read_task = tokio::spawn(async move {
-        let _ = message::read_messages(reader, |msg| {
+        message::read_messages(reader, |msg| {
             println!("{}", msg);
         })
-        .await;
+        .await
     });
 
     // stdin → socket
@@ -136,36 +152,33 @@ async fn run_as_client(channel: &str) -> anyhow::Result<()> {
         }
     });
 
-    // Exit when socket closes
-    read_task.await?;
+    // Wait for host to disconnect
+    read_task.await??;
     Ok(())
 }
 
-fn print_server_instructions(channel: &str) {
+fn print_host_instructions(channel: &str) {
     let socket_path = socket::socket_path(channel)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| format!("/tmp/murmur-{}.sock", channel));
 
     eprintln!(
-        r#"murmur channel "{}" ready (hosting)
-
+        r#"
 Other agents connect with:
-  murmur {}                               # join channel (N peers supported)
+  murmur {}                               # join (auto-failover if host dies)
   murmur send {} "message"                # send one message
   echo "msg" | nc -U {}     # raw socket
 
-All messages are broadcast to all connected peers.
+All messages broadcast to all peers. Ctrl+C to exit.
 ---"#,
-        channel, channel, channel, socket_path
+        channel, channel, socket_path
     );
 }
 
-fn print_client_instructions(channel: &str) {
+fn print_peer_instructions(_channel: &str) {
     eprintln!(
-        r#"murmur channel "{}" connected
-
-Messages from any peer appear on stdout. Your stdin broadcasts to all.
+        r#"
+All messages broadcast to all peers. If host dies, a peer auto-promotes.
 ---"#,
-        channel
     );
 }
