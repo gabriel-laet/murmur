@@ -3,6 +3,7 @@ mod cli;
 mod error;
 mod listen;
 mod message;
+mod pair;
 mod pubsub;
 mod send;
 mod socket;
@@ -15,7 +16,14 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Listen { channel } => listen::run(&channel).await,
-        Command::Send { channel, message } => send::run(&channel, message).await,
+        Command::Send {
+            channel,
+            message,
+            wait,
+            timeout,
+            reply,
+        } => send::run(&channel, message, wait, timeout, reply).await,
+        Command::Pair { channel } => pair::run(&channel).await,
         Command::Pub { channel } => pubsub::run_pub(&channel).await,
         Command::Sub { channel } => pubsub::run_sub(&channel).await,
         Command::Ls => channels::ls(),

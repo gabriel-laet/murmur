@@ -11,14 +11,27 @@ cargo install --path .
 ## Usage
 
 ```bash
-# Listen on a channel (prints incoming messages to stdout)
+# Listen on a channel (prints incoming messages to stdout, blocks)
 murmur listen mychannel
 
 # Send a message
 murmur send mychannel "hello from agent-1"
 
+# Wait for listener to come up (retries every 50ms, 5s default timeout)
+murmur send --wait mychannel "hello"
+
+# Send and wait for a reply (one line back)
+murmur send --reply mychannel '{"cmd": "status"}'
+
+# Combine: wait for listener + get reply
+murmur send --wait --reply mychannel "ping"
+
 # Pipe stdin
 echo '{"task": "summarize", "id": 42}' | murmur send mychannel
+
+# Bidirectional duplex (first caller binds, second connects)
+murmur pair chat    # terminal 1 — binds, waits for peer
+murmur pair chat    # terminal 2 — connects, both sides talk
 
 # Pub/sub broadcast
 murmur pub feed          # reads stdin, broadcasts to all subscribers
@@ -39,9 +52,31 @@ murmur listen tasks | while read -r msg; do
   echo "got: $msg"
 done
 
-# Terminal 2 - coordinator sends work
-murmur send tasks "summarize document.pdf"
-murmur send tasks "translate output to french"
+# Terminal 2 - coordinator sends work (waits for listener)
+murmur send --wait tasks "summarize document.pdf"
+murmur send --wait tasks "translate output to french"
+```
+
+Request/reply pattern:
+
+```bash
+# Terminal 1 - agent listens and replies
+murmur listen tasks  # handle connections that expect replies in your app
+
+# Terminal 2 - send and get reply
+RESULT=$(murmur send --wait --reply tasks '{"cmd": "summarize", "file": "doc.pdf"}')
+echo "Agent replied: $RESULT"
+```
+
+Bidirectional duplex:
+
+```bash
+# Terminal 1
+murmur pair chat
+
+# Terminal 2
+murmur pair chat
+# Now both sides: stdin → socket, socket → stdout
 ```
 
 Fan-out to multiple workers:
