@@ -2,11 +2,14 @@ mod channels;
 mod cli;
 mod connect;
 mod error;
+mod hook;
 mod listen;
+mod mcp_server;
 mod message;
-mod pair;
-mod pubsub;
+mod orchestrate;
+mod protocol;
 mod send;
+mod spawn;
 mod socket;
 
 use clap::Parser;
@@ -31,11 +34,12 @@ async fn main() -> anyhow::Result<()> {
             timeout,
             reply,
         }) => send::run(&channel, message, !no_wait, timeout, reply).await,
-        Some(Command::Pair { channel }) => pair::run(&channel).await,
-        Some(Command::Pub { channel }) => pubsub::run_pub(&channel).await,
-        Some(Command::Sub { channel }) => pubsub::run_sub(&channel).await,
         Some(Command::Ls) => channels::ls(),
         Some(Command::Rm { channel }) => channels::rm(&channel),
+        Some(Command::Hook { channel }) => hook::run(&channel).await,
+        Some(Command::McpServer { channel }) => mcp_server::run(&channel).await,
+        Some(Command::Orchestrate { channel }) => orchestrate::run(&channel).await,
+        Some(Command::Spawn { id, command }) => spawn::run(&id, &command),
         None => {
             // No channel and no command - print help
             use clap::CommandFactory;
