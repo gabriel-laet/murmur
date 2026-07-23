@@ -1,7 +1,9 @@
 mod commands;
 mod hook;
 mod mcp;
+mod setup;
 mod store;
+mod tasks;
 
 use clap::{Parser, Subcommand};
 
@@ -16,10 +18,13 @@ Messages wait in the recipient's inbox until read — nobody needs to be listeni
 Identity comes from --as <name> or the MURMUR_AGENT env var.
 
 QUICK START:
-    murmur join backend                    # announce yourself
+    murmur setup                           # wire this repo (hooks + MCP) in one command
     murmur send frontend \"API is ready\"    # message a peer (delivered even if they're busy)
     murmur send '*' \"rebasing main\"        # broadcast to everyone
+    murmur send db \"schema ok?\" --reply    # ask and block for the answer
     murmur inbox --wait                    # read your mail, block until some arrives
+    murmur task add \"write auth tests\"     # put work on the shared board
+    murmur task take                       # atomically grab the oldest open task
     murmur watch                           # (human) watch all agent chatter live
 
 Inspect everything with plain tools: cat .murmur/log.jsonl, ls .murmur/inbox/"
@@ -40,6 +45,15 @@ enum Command {
         /// Your agent name (defaults to $MURMUR_AGENT)
         #[arg(long = "as", value_name = "NAME")]
         r#as: Option<String>,
+        /// Block until the recipient replies, then print the reply
+        #[arg(long)]
+        reply: bool,
+        /// Mark this message as a reply to a message id
+        #[arg(long, value_name = "MSG_ID")]
+        reply_to: Option<String>,
+        /// Give up waiting for a reply after this many seconds
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
     },
     /// Read your pending messages (consumes them unless --peek)
     Inbox {
@@ -115,10 +129,56 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// MCP server over stdio (tools: send_message, broadcast, check_inbox, list_agents, claim_file, release_file)
+    /// Shared work queue: a task board where taking a task is atomic
+    Task {
+        #[command(subcommand)]
+        cmd: TaskCmd,
+    },
+    /// Wire this repo for agent coordination (.claude/settings.json hooks + .mcp.json)
+    Setup,
+    /// MCP server over stdio (messaging, claims, and task tools)
     Mcp,
     /// Claude Code hook adapter (reads hook JSON on stdin)
     Hook,
+}
+
+#[derive(Subcommand)]
+enum TaskCmd {
+    /// Put a task on the board
+    Add {
+        title: String,
+        /// Longer description
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long = "as", value_name = "NAME")]
+        r#as: Option<String>,
+    },
+    /// List open and in-progress tasks (--all includes done)
+    List {
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Atomically take the oldest open task
+    Take {
+        #[arg(long = "as", value_name = "NAME")]
+        r#as: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark a task you took as done (id prefix is enough)
+    Done {
+        id: String,
+        #[arg(long = "as", value_name = "NAME")]
+        r#as: Option<String>,
+    },
+    /// Put a task you took back on the board
+    Drop {
+        id: String,
+        #[arg(long = "as", value_name = "NAME")]
+        r#as: Option<String>,
+    },
 }
 
 fn main() {
@@ -130,7 +190,9 @@ fn main() {
 
 fn run() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::Send { to, message, r#as } => commands::send(&to, message, r#as),
+        Command::Send { to, message, r#as, reply, reply_to, timeout } => {
+            commands::send(&to, message, r#as, reply_to, reply, timeout)
+        }
         Command::Inbox { wait, timeout, peek, json, r#as } => {
             commands::inbox(r#as, wait, timeout, peek, json)
         }
@@ -143,6 +205,14 @@ fn run() -> anyhow::Result<()> {
         Command::Log { count, json } => commands::log(count, json),
         Command::Watch { all, json } => commands::watch(all, json),
         Command::Clean { all } => commands::clean(all),
+        Command::Task { cmd } => match cmd {
+            TaskCmd::Add { title, body, r#as } => commands::task_add(&title, body, r#as),
+            TaskCmd::List { all, json } => commands::task_list(all, json),
+            TaskCmd::Take { r#as, json } => commands::task_take(r#as, json),
+            TaskCmd::Done { id, r#as } => commands::task_done(&id, r#as),
+            TaskCmd::Drop { id, r#as } => commands::task_drop(&id, r#as),
+        },
+        Command::Setup => setup::run(),
         Command::Mcp => mcp::run(),
         Command::Hook => hook::run(),
     }

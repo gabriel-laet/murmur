@@ -1,0 +1,166 @@
+//! A shared work queue with no queue server. A task is a file; its state is
+//! which directory it's in (`tasks/todo`, `tasks/doing`, `tasks/done`).
+//! Taking a task is `rename(todo/X, doing/X)` — atomic, so when N agents race
+//! for the same task exactly one rename succeeds and the losers move on to
+//! the next file. Work-stealing semantics for free.
+
+use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+
+use crate::store::{self, Store};
+
+pub const STATES: [&str; 3] = ["todo", "doing", "done"];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Task {
+    pub id: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
+    pub by: String,
+    /// unix millis
+    pub ts: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taken_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_by: Option<String>,
+}
+
+impl Store {
+    fn task_dir(&self, state: &str) -> PathBuf {
+        self.root().join("tasks").join(state)
+    }
+
+    fn task_init(&self) -> Result<()> {
+        self.init()?;
+        for state in STATES {
+            fs::create_dir_all(self.task_dir(state))?;
+        }
+        Ok(())
+    }
+
+    pub fn task_add(&self, by: &str, title: &str, body: &str) -> Result<Task> {
+        store::valid_name(by)?;
+        self.task_init()?;
+        self.touch(by)?;
+        let ts = store::now_millis();
+        let task = Task {
+            id: store::next_id(ts),
+            title: title.to_string(),
+            body: body.to_string(),
+            by: by.to_string(),
+            ts,
+            taken_by: None,
+            done_by: None,
+        };
+        let tmp = self.root().join("tmp").join(format!("task-{}", task.id));
+        fs::write(&tmp, serde_json::to_vec(&task)?)?;
+        fs::rename(&tmp, self.task_dir("todo").join(format!("{}.json", task.id)))?;
+        Ok(task)
+    }
+
+    /// All tasks in the given states, oldest first within each state.
+    pub fn task_list(&self, states: &[&str]) -> Result<Vec<(String, Task)>> {
+        let mut out = Vec::new();
+        for state in states {
+            let dir = self.task_dir(state);
+            if !dir.is_dir() {
+                continue;
+            }
+            let mut paths: Vec<PathBuf> = fs::read_dir(&dir)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .collect();
+            paths.sort();
+            for path in paths {
+                let Ok(bytes) = fs::read(&path) else { continue };
+                if let Ok(task) = serde_json::from_slice::<Task>(&bytes) {
+                    out.push((state.to_string(), task));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn open_task_count(&self) -> usize {
+        self.task_list(&["todo"]).map(|t| t.len()).unwrap_or(0)
+    }
+
+    /// Grab the oldest todo task. Atomic under contention: the rename either
+    /// succeeds (it's yours) or fails (someone else won; try the next one).
+    pub fn task_take(&self, name: &str) -> Result<Option<Task>> {
+        store::valid_name(name)?;
+        self.task_init()?;
+        self.touch(name)?;
+        let todo = self.task_dir("todo");
+        let mut paths: Vec<PathBuf> = fs::read_dir(&todo)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Some(file_name) = path.file_name() else { continue };
+            let dest = self.task_dir("doing").join(file_name);
+            if fs::rename(&path, &dest).is_err() {
+                continue; // lost the race for this one
+            }
+            let Ok(bytes) = fs::read(&dest) else { continue };
+            let Ok(mut task) = serde_json::from_slice::<Task>(&bytes) else { continue };
+            task.taken_by = Some(name.to_string());
+            fs::write(&dest, serde_json::to_vec(&task)?)?;
+            return Ok(Some(task));
+        }
+        Ok(None)
+    }
+
+    pub fn task_done(&self, name: &str, id_prefix: &str) -> Result<Task> {
+        let (path, mut task) = self.find_task("doing", id_prefix)?;
+        if task.taken_by.as_deref() != Some(name) {
+            bail!(
+                "task {} is taken by {}, not you",
+                task.id,
+                task.taken_by.as_deref().unwrap_or("nobody")
+            );
+        }
+        task.done_by = Some(name.to_string());
+        let dest = self.task_dir("done").join(format!("{}.json", task.id));
+        fs::write(&dest, serde_json::to_vec(&task)?)?;
+        fs::remove_file(&path)?;
+        Ok(task)
+    }
+
+    /// Put a taken task back on the board.
+    pub fn task_drop(&self, name: &str, id_prefix: &str) -> Result<Task> {
+        let (path, mut task) = self.find_task("doing", id_prefix)?;
+        if task.taken_by.as_deref() != Some(name) {
+            bail!(
+                "task {} is taken by {}, not you",
+                task.id,
+                task.taken_by.as_deref().unwrap_or("nobody")
+            );
+        }
+        task.taken_by = None;
+        let dest = self.task_dir("todo").join(format!("{}.json", task.id));
+        fs::write(&dest, serde_json::to_vec(&task)?)?;
+        fs::remove_file(&path)?;
+        Ok(task)
+    }
+
+    fn find_task(&self, state: &str, id_prefix: &str) -> Result<(PathBuf, Task)> {
+        self.task_init()?;
+        let mut matches = Vec::new();
+        for (_, task) in self.task_list(&[state])? {
+            if task.id.starts_with(id_prefix) {
+                let path = self.task_dir(state).join(format!("{}.json", task.id));
+                matches.push((path, task));
+            }
+        }
+        match matches.len() {
+            0 => bail!("no {} task matching '{}'", state, id_prefix),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            n => bail!("'{}' is ambiguous ({} matches) — use more of the id", id_prefix, n),
+        }
+    }
+}

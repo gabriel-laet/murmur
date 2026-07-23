@@ -76,12 +76,25 @@ fn call_tool(tool: &str, args: &Value, name: &str) -> Result<String> {
 
     match tool {
         "send_message" => {
-            let recipients = store.send(name, &str_arg("to"), &str_arg("message"))?;
-            Ok(format!("delivered to {}", recipients.join(", ")))
+            let reply_to = args.get("reply_to").and_then(|v| v.as_str());
+            let (recipients, id) =
+                store.send(name, &str_arg("to"), &str_arg("message"), reply_to, false)?;
+            Ok(format!("delivered to {} (id {})", recipients.join(", "), id))
         }
         "broadcast" => {
-            let recipients = store.send(name, "*", &str_arg("message"))?;
+            let (recipients, _) = store.send(name, "*", &str_arg("message"), None, false)?;
             Ok(format!("delivered to {}", recipients.join(", ")))
+        }
+        "ask" => {
+            let timeout = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(60);
+            let (_, id) = store.send(name, &str_arg("to"), &str_arg("message"), None, true)?;
+            match store.await_reply(name, &id, std::time::Duration::from_secs(timeout))? {
+                Some(reply) => Ok(reply.body),
+                None => Ok(format!(
+                    "no reply within {}s — the message stays in their inbox; check_inbox later",
+                    timeout
+                )),
+            }
         }
         "check_inbox" => {
             let msgs = store.drain(name, false)?;
@@ -90,7 +103,48 @@ fn call_tool(tool: &str, args: &Value, name: &str) -> Result<String> {
             } else {
                 Ok(msgs
                     .iter()
-                    .map(|m| format!("[{}] {}: {}", store::clock(m.ts), m.from, m.body))
+                    .map(|m| {
+                        if m.wants_reply {
+                            format!(
+                                "[{}] {}: {} (reply expected — use send_message with reply_to={})",
+                                store::clock(m.ts), m.from, m.body, m.id
+                            )
+                        } else {
+                            format!("[{}] {}: {}", store::clock(m.ts), m.from, m.body)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            }
+        }
+        "add_task" => {
+            let task = store.task_add(name, &str_arg("title"), &str_arg("body"))?;
+            Ok(format!("added task {}", task.id))
+        }
+        "take_task" => match store.task_take(name)? {
+            Some(task) => Ok(format!(
+                "took task {}: {}{}\nmark it finished with complete_task when done",
+                task.id,
+                task.title,
+                if task.body.is_empty() { String::new() } else { format!("\n{}", task.body) }
+            )),
+            None => Ok("no open tasks".into()),
+        },
+        "complete_task" => {
+            let task = store.task_done(name, &str_arg("id"))?;
+            Ok(format!("done: {} {}", task.id, task.title))
+        }
+        "list_tasks" => {
+            let tasks = store.task_list(&["todo", "doing"])?;
+            if tasks.is_empty() {
+                Ok("no open or in-progress tasks".into())
+            } else {
+                Ok(tasks
+                    .iter()
+                    .map(|(state, t)| {
+                        let who = t.taken_by.as_deref().map(|w| format!(" (taken by {})", w)).unwrap_or_default();
+                        format!("{} {} {}{}", state, t.id, t.title, who)
+                    })
                     .collect::<Vec<_>>()
                     .join("\n"))
             }
@@ -141,10 +195,57 @@ fn tool_definitions() -> Value {
                 "type": "object",
                 "properties": {
                     "to": { "type": "string", "description": "Recipient agent name (see list_agents)" },
-                    "message": { "type": "string", "description": "Message text" }
+                    "message": { "type": "string", "description": "Message text" },
+                    "reply_to": { "type": "string", "description": "Message id this replies to (when the sender asked and is waiting)" }
                 },
                 "required": ["to", "message"]
             }
+        },
+        {
+            "name": "ask",
+            "description": "Send a question to another agent and block until they reply (or timeout). Returns the reply text.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "Recipient agent name" },
+                    "message": { "type": "string", "description": "The question" },
+                    "timeout_secs": { "type": "number", "description": "How long to wait (default 60)" }
+                },
+                "required": ["to", "message"]
+            }
+        },
+        {
+            "name": "add_task",
+            "description": "Put a task on the shared work board for any agent to take.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Short task title" },
+                    "body": { "type": "string", "description": "Details, acceptance criteria, file paths" }
+                },
+                "required": ["title"]
+            }
+        },
+        {
+            "name": "take_task",
+            "description": "Atomically take the oldest open task from the shared board. Exactly one agent wins a contested task.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "complete_task",
+            "description": "Mark a task you took as done.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Task id (prefix is enough)" }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "list_tasks",
+            "description": "List open and in-progress tasks on the shared board.",
+            "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "broadcast",

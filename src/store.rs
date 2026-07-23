@@ -32,6 +32,12 @@ pub struct Msg {
     /// unix millis
     pub ts: u64,
     pub body: String,
+    /// id of the message this replies to
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub re: Option<String>,
+    /// sender is blocked waiting on a reply to this id
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wants_reply: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,8 +112,15 @@ impl Store {
     // ---- messages ----
 
     /// Deliver a message. `to` may be an agent name or `*` for broadcast.
-    /// Returns the list of recipients.
-    pub fn send(&self, from: &str, to: &str, body: &str) -> Result<Vec<String>> {
+    /// Returns the recipients and the message id.
+    pub fn send(
+        &self,
+        from: &str,
+        to: &str,
+        body: &str,
+        re: Option<&str>,
+        wants_reply: bool,
+    ) -> Result<(Vec<String>, String)> {
         valid_name(from)?;
         self.init()?;
         self.touch(from)?;
@@ -136,6 +149,8 @@ impl Store {
             to: if recipients.len() > 1 { "*".into() } else { to.to_string() },
             ts,
             body: body.to_string(),
+            re: re.map(|s| s.to_string()),
+            wants_reply,
         };
         for recipient in &recipients {
             let msg = Msg { to: recipient.clone(), ..logged.clone() };
@@ -146,7 +161,43 @@ impl Store {
             fs::rename(&tmp, inbox.join(format!("{}.json", id)))?;
         }
         self.append_log(&logged)?;
-        Ok(recipients)
+        Ok((recipients, id))
+    }
+
+    /// Block until a reply to `re_id` lands in `name`'s inbox, consuming only
+    /// that message — everything else stays queued for a normal drain.
+    pub fn await_reply(
+        &self,
+        name: &str,
+        re_id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Option<Msg>> {
+        valid_name(name)?;
+        self.init()?;
+        let inbox = self.root.join("inbox").join(name);
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if inbox.is_dir() {
+                let mut paths: Vec<PathBuf> = fs::read_dir(&inbox)?
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .collect();
+                paths.sort();
+                for path in paths {
+                    let Ok(bytes) = fs::read(&path) else { continue };
+                    if let Ok(msg) = serde_json::from_slice::<Msg>(&bytes) {
+                        if msg.re.as_deref() == Some(re_id) {
+                            let _ = fs::remove_file(&path);
+                            return Ok(Some(msg));
+                        }
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 
     /// Read pending messages, oldest first. Consumes them unless `peek`.
@@ -419,7 +470,7 @@ pub fn now_secs() -> u64 {
     now_millis() / 1000
 }
 
-fn next_id(ts: u64) -> String {
+pub fn next_id(ts: u64) -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     format!("{:013}-{}-{:03}", ts, std::process::id(), seq)

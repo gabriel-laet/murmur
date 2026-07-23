@@ -14,7 +14,14 @@ pub fn identity(explicit: Option<String>) -> Result<String> {
     Ok(name)
 }
 
-pub fn send(to: &str, body: Option<String>, from: Option<String>) -> Result<()> {
+pub fn send(
+    to: &str,
+    body: Option<String>,
+    from: Option<String>,
+    reply_to: Option<String>,
+    await_reply: bool,
+    timeout: u64,
+) -> Result<()> {
     let from = identity(from)?;
     let body = match body {
         Some(b) => b,
@@ -25,9 +32,19 @@ pub fn send(to: &str, body: Option<String>, from: Option<String>) -> Result<()> 
         }
     };
     let store = Store::locate()?;
-    let recipients = store.send(&from, to, &body)?;
-    println!("delivered to {}", recipients.join(", "));
-    Ok(())
+    let (recipients, id) = store.send(&from, to, &body, reply_to.as_deref(), await_reply)?;
+    if !await_reply {
+        println!("delivered to {}", recipients.join(", "));
+        return Ok(());
+    }
+    eprintln!("delivered to {}, waiting for a reply...", recipients.join(", "));
+    match store.await_reply(&from, &id, Duration::from_secs(timeout))? {
+        Some(reply) => {
+            println!("{}", reply.body);
+            Ok(())
+        }
+        None => anyhow::bail!("no reply within {}s (message stays delivered)", timeout),
+    }
 }
 
 pub fn inbox(name: Option<String>, wait: bool, timeout: u64, peek: bool, json: bool) -> Result<()> {
@@ -56,7 +73,14 @@ fn print_msgs(msgs: &[Msg], json: bool) {
         if json {
             println!("{}", serde_json::to_string(msg).unwrap_or_default());
         } else {
-            println!("[{}] {}: {}", store::clock(msg.ts), msg.from, msg.body);
+            let marker = if msg.re.is_some() { "↩ " } else { "" };
+            println!("[{}] {}: {}{}", store::clock(msg.ts), msg.from, marker, msg.body);
+            if msg.wants_reply {
+                println!(
+                    "  ↳ sender is waiting: murmur send {} \"...\" --reply-to {}",
+                    msg.from, msg.id
+                );
+            }
         }
     }
 }
@@ -213,6 +237,80 @@ pub fn watch(all: bool, json: bool) -> Result<()> {
             }
         }
     }
+}
+
+pub fn task_add(title: &str, body: Option<String>, name: Option<String>) -> Result<()> {
+    let name = identity(name)?;
+    let store = Store::locate()?;
+    let task = store.task_add(&name, title, body.as_deref().unwrap_or(""))?;
+    println!("added task {}", task.id);
+    Ok(())
+}
+
+pub fn task_list(all: bool, json: bool) -> Result<()> {
+    let store = Store::locate()?;
+    let states: &[&str] = if all { &crate::tasks::STATES } else { &["todo", "doing"] };
+    let tasks = store.task_list(states)?;
+    if json {
+        let items: Vec<serde_json::Value> = tasks
+            .iter()
+            .map(|(state, t)| {
+                let mut v = serde_json::to_value(t).unwrap_or_default();
+                v["state"] = serde_json::Value::String(state.clone());
+                v
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&items)?);
+        return Ok(());
+    }
+    if tasks.is_empty() {
+        eprintln!("no tasks (add one with: murmur task add \"...\")");
+        return Ok(());
+    }
+    for (state, t) in tasks {
+        let who = match (&t.taken_by, &t.done_by) {
+            (_, Some(d)) => format!(" (done by {})", d),
+            (Some(w), _) => format!(" (taken by {})", w),
+            _ => String::new(),
+        };
+        println!("{:<6} {}  {}{}", state, t.id, t.title, who);
+    }
+    Ok(())
+}
+
+pub fn task_take(name: Option<String>, json: bool) -> Result<()> {
+    let name = identity(name)?;
+    let store = Store::locate()?;
+    match store.task_take(&name)? {
+        Some(task) => {
+            if json {
+                println!("{}", serde_json::to_string(&task)?);
+            } else {
+                println!("took task {}", task.id);
+                println!("  {}", task.title);
+                if !task.body.is_empty() {
+                    println!("  {}", task.body);
+                }
+                println!("  when finished: murmur task done {} --as {}", task.id, name);
+            }
+            Ok(())
+        }
+        None => anyhow::bail!("no open tasks"),
+    }
+}
+
+pub fn task_done(id: &str, name: Option<String>) -> Result<()> {
+    let name = identity(name)?;
+    let task = Store::locate()?.task_done(&name, id)?;
+    println!("done: {}  {}", task.id, task.title);
+    Ok(())
+}
+
+pub fn task_drop(id: &str, name: Option<String>) -> Result<()> {
+    let name = identity(name)?;
+    let task = Store::locate()?.task_drop(&name, id)?;
+    println!("back on the board: {}  {}", task.id, task.title);
+    Ok(())
 }
 
 pub fn clean(all: bool) -> Result<()> {

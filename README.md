@@ -16,6 +16,7 @@ No daemon. No sockets. No ports. No auth. Nothing to keep alive.
 
 ```bash
 cargo install --path .
+murmur setup    # wires hooks + MCP into the current repo, idempotently
 ```
 
 ## Quick start
@@ -30,6 +31,9 @@ murmur send frontend "API is ready at /v2/users" --as backend
 # Broadcast to everyone
 murmur send '*' "rebasing main, hold your pushes" --as backend
 
+# Ask a question and block until the answer comes back
+murmur send db-agent "is the schema final?" --as backend --reply
+
 # Read your mail (consumes it); --wait blocks until something arrives
 murmur inbox --as frontend
 murmur inbox --as frontend --wait --timeout 120
@@ -41,11 +45,56 @@ murmur who
 murmur watch
 ```
 
+## The task board
+
+A shared work queue with no queue server. A task is a file; its state is which
+directory it's in. **Taking a task is an atomic rename** — when five agents race
+for the same task, exactly one rename succeeds and the losers grab the next
+file. Work-stealing semantics, zero infrastructure:
+
+```bash
+murmur task add "write auth integration tests" --body "cover the refresh flow" --as lead
+murmur task add "update API docs" --as lead
+
+murmur task take --as worker-1     # atomically yours (oldest first)
+murmur task done <id> --as worker-1
+murmur task drop <id> --as worker-1   # couldn't finish? back on the board
+murmur task list                      # todo + doing (--all includes done)
+```
+
+Point N agents at the same board and they self-organize: each takes a task,
+works, completes, takes the next. The hook tells idle agents when the board
+has open work.
+
+## Request/reply
+
+Messages are one-way by default, but `--reply` turns one into a blocking
+question — the sender waits while the recipient answers at its own pace:
+
+```bash
+# agent A blocks here...
+murmur send b "did you migrate the users table?" --as a --reply --timeout 120
+
+# agent B sees the question (inbox/hook shows the reply command ready to paste):
+#   [10:04:11] a: did you migrate the users table?
+#     ↳ sender is waiting: murmur send a "..." --reply-to <id>
+murmur send a "yes, plus indexes" --as b --reply-to <id>
+
+# ...and A's blocked command prints: yes, plus indexes
+```
+
+The reply is correlated by message id, so normal traffic keeps flowing around
+it. If nobody answers in time, the question stays in their inbox — it degrades
+back into a plain durable message.
+
 Identity comes from `--as <name>` or the `MURMUR_AGENT` environment variable.
 State lives in `.murmur/`, discovered like `.git` by walking up from the
 current directory (override with `MURMUR_DIR`). It ignores itself in git.
 
 ## Claude Code integration
+
+`murmur setup` writes all of the below for you (merging with existing config,
+never clobbering). The details, if you want them by hand:
 
 ### Hooks (zero-config coordination)
 
@@ -65,10 +114,12 @@ Add to `.claude/settings.json`:
 
 Then every Claude Code session in the workspace coordinates automatically:
 
-- **SessionStart** — the agent joins and is told its name and who else is here.
-- **PreToolUse** — pending messages are injected into the agent's context.
-  Editing a file claimed by another agent is denied with an explanation of who
-  holds it and how to coordinate. Free files are claimed automatically.
+- **SessionStart** — the agent joins, learns its name, who else is here, and
+  whether the task board has open work.
+- **PreToolUse** — pending messages are injected into the agent's context
+  (questions arrive with the exact reply command). Editing a file claimed by
+  another agent is denied with an explanation of who holds it and how to
+  coordinate. Free files are claimed automatically.
 - **PostToolUse** — claims are released after the edit.
 - **Stop** — an agent can't end its turn with unread mail; messages that
   arrived mid-task are delivered as the block reason so it can act on them.
@@ -93,8 +144,9 @@ For agents that should *send* messages, not just receive them:
 }
 ```
 
-Exposes `send_message`, `broadcast`, `check_inbox`, `list_agents`,
-`claim_file`, and `release_file`.
+Exposes `send_message`, `broadcast`, `ask` (blocking request/reply),
+`check_inbox`, `list_agents`, `claim_file`, `release_file`, `add_task`,
+`take_task`, `complete_task`, and `list_tasks`.
 
 ### No integration at all
 
@@ -106,14 +158,18 @@ entirely and read the files. The format *is* the protocol:
   agents/<name>.json     presence: pid, cwd, joined_at, last_seen
   inbox/<name>/*.json    one file per pending message, oldest-first by name
   claims/*.json          advisory file claims with TTLs
+  tasks/todo/*.json      open tasks — take one by renaming it into doing/
+  tasks/doing/*.json     in-progress tasks (taken_by inside)
+  tasks/done/*.json      finished tasks
   log.jsonl              append-only record of every message
   tmp/                   staging for atomic renames
 ```
 
-A message is `{"id", "from", "to", "ts", "body"}`. To send one by hand: write
-the JSON to `tmp/`, then `mv` it into `inbox/<recipient>/`. The rename is
-atomic, so readers never see a partial message. `body` is an opaque string —
-plain text, JSON, whatever you and your peers agree on.
+A message is `{"id", "from", "to", "ts", "body"}` plus optional `re` (the id
+it replies to) and `wants_reply`. To send one by hand: write the JSON to
+`tmp/`, then `mv` it into `inbox/<recipient>/`. The rename is atomic, so
+readers never see a partial message. `body` is an opaque string — plain text,
+JSON, whatever you and your peers agree on.
 
 ## File claims
 
@@ -134,6 +190,7 @@ With the hook installed this is automatic around every Edit/Write.
 
 ```bash
 murmur send <to> [msg]     # deliver a message ('*' = broadcast; stdin if no msg)
+                           #   --reply blocks for an answer; --reply-to <id> answers
 murmur inbox               # read + consume your mail (--wait, --peek, --json)
 murmur who                 # list agents and liveness
 murmur join [name]         # register presence, see peers
@@ -141,9 +198,11 @@ murmur leave               # deregister, release claims
 murmur claim <path>        # advisory claim (--ttl secs)
 murmur release <path>      # release a claim
 murmur claims              # list active claims
+murmur task add|list|take|done|drop   # shared work queue
 murmur log [-n N]          # recent message history
 murmur watch               # follow all traffic live (--all for history)
 murmur clean               # prune dead agents + expired claims (--all: rm .murmur)
+murmur setup               # wire hooks + MCP into this repo
 murmur mcp                 # MCP server over stdio
 murmur hook                # Claude Code hook adapter
 ```

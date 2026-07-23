@@ -85,11 +85,20 @@ fn session_start(store: &Store, name: &str) {
     } else {
         format!("Other agents here: {}.", peers.join(", "))
     };
+    let open_tasks = store.open_task_count();
+    let tasks_line = if open_tasks > 0 {
+        format!(
+            " {} open task(s) on the shared board — grab one with `murmur task take --as {}`.",
+            open_tasks, name
+        )
+    } else {
+        String::new()
+    };
     let context = format!(
         "murmur: you are agent '{}'. {} Message a peer with `murmur send <peer> \"...\" --as {}` \
          or broadcast with `murmur send '*' \"...\" --as {}`. Incoming messages appear in your \
-         context automatically.",
-        name, peers_line, name, name
+         context automatically.{}",
+        name, peers_line, name, name, tasks_line
     );
     emit(json!({
         "hookSpecificOutput": {
@@ -153,11 +162,17 @@ fn post_tool_use(store: &Store, name: &str, hook: &HookInput) {
 fn stop(store: &Store, name: &str) {
     let messages = store.drain(name, false).unwrap_or_default();
     if let Some(text) = format_messages(&messages) {
+        let open_tasks = store.open_task_count();
+        let tasks_note = if open_tasks > 0 {
+            format!("\n(Also: {} open task(s) on the board — `murmur task list`.)", open_tasks)
+        } else {
+            String::new()
+        };
         emit(json!({
             "decision": "block",
             "reason": format!(
-                "You received messages from other agents while working:\n{}\nAddress them (reply with `murmur send`) or continue if no action is needed.",
-                text
+                "You received messages from other agents while working:\n{}\nAddress them (reply with `murmur send`) or continue if no action is needed.{}",
+                text, tasks_note
             )
         }));
     }
@@ -170,7 +185,16 @@ fn format_messages(messages: &[Msg]) -> Option<String> {
     Some(
         messages
             .iter()
-            .map(|m| format!("[murmur from {}] {}", m.from, m.body))
+            .map(|m| {
+                if m.wants_reply {
+                    format!(
+                        "[murmur from {}] {} (they are blocked waiting — reply with: murmur send {} \"...\" --reply-to {})",
+                        m.from, m.body, m.from, m.id
+                    )
+                } else {
+                    format!("[murmur from {}] {}", m.from, m.body)
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n"),
     )
