@@ -32,6 +32,9 @@ pub struct Msg {
     /// unix millis
     pub ts: u64,
     pub body: String,
+    /// node the message originated on
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node: String,
     /// id of the message this replies to
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub re: Option<String>,
@@ -47,6 +50,24 @@ pub struct Agent {
     pub cwd: String,
     pub joined_at: u64,
     pub last_seen: u64,
+    /// node the agent lives on
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub node: String,
+}
+
+/// One line of a per-node log. The line number IS the sequence number, so a
+/// sync vector is just {node: line_count} and "what am I missing" is
+/// "lines after N" — no counters to maintain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum Entry {
+    /// a message delivered to one recipient's inbox
+    #[serde(rename = "msg")]
+    Msg { msg: Msg },
+    /// recipient consumed message `id` — suppresses re-materialization
+    /// everywhere and deletes stray copies
+    #[serde(rename = "tomb")]
+    Tomb { id: String, to: String, ts: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +95,10 @@ pub struct Store {
 }
 
 impl Store {
+    pub fn at(root: PathBuf) -> Store {
+        Store { root }
+    }
+
     /// `MURMUR_DIR`, else the nearest `.murmur` walking up from cwd,
     /// else `.murmur` in cwd (created lazily on first write).
     pub fn locate() -> Result<Store> {
@@ -141,26 +166,27 @@ impl Store {
             vec![to.to_string()]
         };
 
+        let node = self.node_name()?;
         let ts = now_millis();
-        let id = next_id(ts);
-        let logged = Msg {
-            id: id.clone(),
-            from: from.to_string(),
-            to: if recipients.len() > 1 { "*".into() } else { to.to_string() },
-            ts,
-            body: body.to_string(),
-            re: re.map(|s| s.to_string()),
-            wants_reply,
-        };
+        let id = format!("{}-{}", next_id(ts), node);
         for recipient in &recipients {
-            let msg = Msg { to: recipient.clone(), ..logged.clone() };
+            let msg = Msg {
+                id: id.clone(),
+                from: from.to_string(),
+                to: recipient.clone(),
+                ts,
+                body: body.to_string(),
+                node: node.clone(),
+                re: re.map(|s| s.to_string()),
+                wants_reply,
+            };
             let inbox = self.root.join("inbox").join(recipient);
             fs::create_dir_all(&inbox)?;
             let tmp = self.root.join("tmp").join(format!("{}-{}", recipient, id));
             fs::write(&tmp, serde_json::to_vec(&msg)?)?;
             fs::rename(&tmp, inbox.join(format!("{}.json", id)))?;
+            self.append_entry(&node, &Entry::Msg { msg })?;
         }
-        self.append_log(&logged)?;
         Ok((recipients, id))
     }
 
@@ -225,36 +251,197 @@ impl Store {
                 let _ = fs::remove_file(&path);
             }
         }
+        if !peek && !msgs.is_empty() {
+            let node = self.node_name()?;
+            for msg in &msgs {
+                self.append_entry(
+                    &node,
+                    &Entry::Tomb { id: msg.id.clone(), to: name.to_string(), ts: now_millis() },
+                )?;
+            }
+        }
         Ok(msgs)
     }
 
-    fn append_log(&self, msg: &Msg) -> Result<()> {
+    // ---- node identity & per-node logs ----
+
+    pub fn node_name(&self) -> Result<String> {
+        self.init()?;
+        let path = self.root.join("node.json");
+        if let Ok(bytes) = fs::read(&path) {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(name) = v["name"].as_str() {
+                    return Ok(name.to_string());
+                }
+            }
+        }
+        let host = std::env::var("HOSTNAME")
+            .ok()
+            .filter(|h| !h.is_empty())
+            .or_else(|| {
+                std::process::Command::new("hostname")
+                    .output()
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            })
+            .unwrap_or_default();
+        let host: String = host
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .take(24)
+            .collect();
+        let host = if host.is_empty() { "node".to_string() } else { host };
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos();
+        let name = format!("{}-{}{:04x}", host, std::process::id() % 10000, nanos & 0xffff);
+        let tmp = self.root.join("tmp").join(format!("node-{}", name));
+        fs::write(&tmp, serde_json::to_vec(&serde_json::json!({ "name": name, "created": now_secs() }))?)?;
+        fs::rename(&tmp, &path)?;
+        Ok(name)
+    }
+
+    pub fn log_dir(&self) -> PathBuf {
+        self.root.join("log")
+    }
+
+    fn append_entry(&self, node: &str, entry: &Entry) -> Result<()> {
+        fs::create_dir_all(self.log_dir())?;
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.log_path())?;
-        let mut line = serde_json::to_vec(msg)?;
+            .open(self.log_dir().join(format!("{}.jsonl", node)))?;
+        let mut line = serde_json::to_vec(entry)?;
         line.push(b'\n');
         file.write_all(&line)?;
         Ok(())
     }
 
-    pub fn log_path(&self) -> PathBuf {
-        self.root.join("log.jsonl")
+    /// {node → entry count}: the sync vector.
+    pub fn log_vector(&self) -> Result<std::collections::HashMap<String, u64>> {
+        let mut vector = std::collections::HashMap::new();
+        if !self.log_dir().is_dir() {
+            return Ok(vector);
+        }
+        for entry in fs::read_dir(self.log_dir())?.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            let count = fs::read_to_string(&path).map(|c| c.lines().count()).unwrap_or(0);
+            vector.insert(stem.to_string(), count as u64);
+        }
+        Ok(vector)
     }
 
-    pub fn log_tail(&self, n: usize) -> Result<Vec<Msg>> {
-        let path = self.log_path();
+    pub fn entries_after(&self, node: &str, after: u64) -> Result<Vec<Entry>> {
+        let path = self.log_dir().join(format!("{}.jsonl", node));
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let content = fs::read_to_string(&path)?;
-        let msgs: Vec<Msg> = content
+        Ok(fs::read_to_string(&path)?
             .lines()
+            .skip(after as usize)
             .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
-        let skip = msgs.len().saturating_sub(n);
-        Ok(msgs.into_iter().skip(skip).collect())
+            .collect())
+    }
+
+    /// Append entries to a foreign node's log. `after` is the count the
+    /// sender based the batch on; anything we already have is skipped, so
+    /// re-applying a batch is harmless.
+    pub fn append_foreign(&self, node: &str, after: u64, entries: &[Entry]) -> Result<()> {
+        let have = *self.log_vector()?.get(node).unwrap_or(&0);
+        anyhow::ensure!(
+            have >= after,
+            "gap in log for node {} (have {}, batch starts at {}) — sync with a peer that has the missing entries",
+            node, have, after
+        );
+        for entry in entries.iter().skip((have - after) as usize) {
+            self.append_entry(node, entry)?;
+        }
+        Ok(())
+    }
+
+    /// All message entries across all node logs, oldest first.
+    pub fn log_msgs(&self) -> Result<Vec<Msg>> {
+        let mut msgs = Vec::new();
+        for node in self.log_vector()?.keys() {
+            for entry in self.entries_after(node, 0)? {
+                if let Entry::Msg { msg } = entry {
+                    msgs.push(msg);
+                }
+            }
+        }
+        msgs.sort_by_key(|m| (m.ts, m.id.clone()));
+        Ok(msgs)
+    }
+
+    /// Rebuild inbox files from the merged logs: materialize messages that
+    /// have no tombstone anywhere, delete copies of consumed ones. Run after
+    /// applying a sync batch. Idempotent.
+    pub fn reconcile_inboxes(&self) -> Result<()> {
+        let mut tombs = std::collections::HashSet::new();
+        let mut msgs = Vec::new();
+        for node in self.log_vector()?.keys() {
+            for entry in self.entries_after(node, 0)? {
+                match entry {
+                    Entry::Msg { msg } => msgs.push(msg),
+                    Entry::Tomb { id, .. } => {
+                        tombs.insert(id);
+                    }
+                }
+            }
+        }
+        for msg in msgs {
+            if valid_name(&msg.to).is_err() {
+                continue;
+            }
+            let inbox = self.root.join("inbox").join(&msg.to);
+            let path = inbox.join(format!("{}.json", msg.id));
+            if tombs.contains(&msg.id) {
+                let _ = fs::remove_file(&path);
+            } else if !path.exists() {
+                fs::create_dir_all(&inbox)?;
+                let tmp = self.root.join("tmp").join(format!("mat-{}-{}", msg.to, msg.id));
+                fs::write(&tmp, serde_json::to_vec(&msg)?)?;
+                fs::rename(&tmp, &path)?;
+            }
+        }
+        Ok(())
+    }
+
+    // ---- state merge (used by sync) ----
+
+    /// Last-writer-wins by `last_seen`.
+    pub fn merge_agent(&self, incoming: Agent) -> Result<()> {
+        self.init()?;
+        let path = self.root.join("agents").join(format!("{}.json", incoming.name));
+        if valid_name(&incoming.name).is_err() {
+            return Ok(());
+        }
+        if let Some(existing) = fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Agent>(&b).ok()) {
+            if existing.last_seen >= incoming.last_seen {
+                return Ok(());
+            }
+        }
+        let tmp = self.root.join("tmp").join(format!("agent-{}-{}", incoming.name, now_millis()));
+        fs::write(&tmp, serde_json::to_vec(&incoming)?)?;
+        fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    /// First claim wins; expired claims never displace anything.
+    pub fn merge_claim(&self, incoming: Claim) -> Result<()> {
+        self.init()?;
+        if incoming.expired() {
+            return Ok(());
+        }
+        let file = self.claim_file(&incoming.path);
+        if let Some(existing) = read_claim(&file) {
+            if !existing.expired() && existing.ts <= incoming.ts {
+                return Ok(());
+            }
+        }
+        let tmp = self.root.join("tmp").join(format!("claim-m-{}", now_millis()));
+        fs::write(&tmp, serde_json::to_vec(&incoming)?)?;
+        fs::rename(&tmp, &file)?;
+        Ok(())
     }
 
     // ---- presence ----
@@ -277,6 +464,7 @@ impl Store {
                 .unwrap_or_default(),
             joined_at,
             last_seen: ts,
+            node: self.node_name()?,
         };
         let tmp = self.root.join("tmp").join(format!("agent-{}-{}", name, ts));
         fs::write(&tmp, serde_json::to_vec(&agent)?)?;
@@ -366,12 +554,15 @@ impl Store {
 
     // ---- housekeeping ----
 
-    /// Remove agents whose pid is gone and claims that have expired.
+    /// Remove local agents whose pid is gone and claims that have expired.
+    /// Remote agents are never pruned here — their own node knows best.
     /// Returns (agents_removed, claims_removed).
     pub fn clean(&self) -> Result<(usize, usize)> {
+        let me = self.node_name()?;
         let mut agents_removed = 0;
         for agent in self.agents()? {
-            if !pid_alive(agent.pid) {
+            let local = agent.node.is_empty() || agent.node == me;
+            if local && !pid_alive(agent.pid) {
                 self.leave(&agent.name)?;
                 agents_removed += 1;
             }

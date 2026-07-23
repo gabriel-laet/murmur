@@ -5,8 +5,10 @@ mod mcp;
 mod secrets;
 mod setup;
 mod store;
+mod sync;
 mod tasks;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -136,6 +138,14 @@ enum Command {
         #[command(subcommand)]
         cmd: TaskCmd,
     },
+    /// Sync with a peer .murmur — a path, or user@host[:path] over ssh. No daemon; git-pull-style trust.
+    Sync {
+        /// Peer: a path to another .murmur (or its parent), or user@host[:path]
+        target: Option<String>,
+        /// Serve one sync session over stdin/stdout (run by the remote end)
+        #[arg(long)]
+        stdio: bool,
+    },
     /// Secret references: pass secrets between agents without the values ever touching the bus
     Secret {
         #[command(subcommand)]
@@ -249,6 +259,14 @@ fn run() -> anyhow::Result<()> {
             TaskCmd::Drop { id, r#as } => commands::task_drop(&id, r#as),
             TaskCmd::Sync { backend, team, label } => commands::task_sync(&backend, team, label),
         },
+        Command::Sync { target, stdio } => {
+            if stdio {
+                sync::run_stdio(target)
+            } else {
+                let target = target.context("sync with what? give a path or user@host[:path]")?;
+                sync::run(&target)
+            }
+        }
         Command::Secret { cmd } => match cmd {
             SecretCmd::Resolve { reference } => commands::secret_resolve(&reference),
             SecretCmd::Exec { pairs, command } => commands::secret_exec(pairs, command),

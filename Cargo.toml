@@ -1,6 +1,6 @@
 [package]
 name = "murmur"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Local message passing for AI agents — a directory of files, not a daemon"
 license = "MIT"

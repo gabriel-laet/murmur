@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::io::{BufRead, Read, Seek, SeekFrom};
+use std::io::Read;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -101,13 +101,19 @@ pub fn who(json: bool) -> Result<()> {
         eprintln!("no agents (join with: murmur join <name>)");
         return Ok(());
     }
+    let me = store.node_name()?;
     for a in agents {
-        let status = if store::pid_alive(a.pid) { "up" } else { "gone" };
+        let status = if a.node.is_empty() || a.node == me {
+            if store::pid_alive(a.pid) { "up" } else { "gone" }
+        } else {
+            "remote"
+        };
+        let node = if a.node.is_empty() || a.node == me { "here".to_string() } else { a.node.clone() };
         println!(
-            "{:<20} {:<5} pid {:<8} seen {:<6} {}",
+            "{:<20} {:<7} {:<20} seen {:<6} {}",
             a.name,
             status,
-            a.pid,
+            node,
             store::ago(a.last_seen),
             a.cwd
         );
@@ -196,7 +202,9 @@ pub fn claims(json: bool) -> Result<()> {
 
 pub fn log(n: usize, json: bool) -> Result<()> {
     let store = Store::locate()?;
-    let msgs = store.log_tail(n)?;
+    let msgs = store.log_msgs()?;
+    let skip = msgs.len().saturating_sub(n);
+    let msgs = &msgs[skip..];
     if msgs.is_empty() && !json {
         eprintln!("no messages yet");
         return Ok(());
@@ -211,36 +219,44 @@ pub fn log(n: usize, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Follow the message log — the human's window into agent chatter.
+/// Follow all per-node logs — the human's window into agent chatter,
+/// cluster-wide once syncs are flowing.
 pub fn watch(all: bool, json: bool) -> Result<()> {
     let store = Store::locate()?;
     store.init()?;
-    let path = store.log_path();
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .read(true)
-        .open(&path)?;
-    let mut reader = std::io::BufReader::new(file);
-    if !all {
-        reader.seek(SeekFrom::End(0))?;
-    }
-    eprintln!("watching {} (ctrl-c to stop)", path.display());
-    let mut line = String::new();
+    let dir = store.log_dir();
+    eprintln!("watching {} (ctrl-c to stop)", dir.display());
+    let mut offsets: std::collections::HashMap<std::path::PathBuf, usize> = std::collections::HashMap::new();
     loop {
-        line.clear();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            thread::sleep(Duration::from_millis(200));
-            continue;
-        }
-        if let Ok(msg) = serde_json::from_str::<Msg>(line.trim()) {
-            if json {
-                print!("{}", line);
-            } else {
-                println!("[{}] {} → {}: {}", store::clock(msg.ts), msg.from, msg.to, msg.body);
+        if dir.is_dir() {
+            let mut paths: Vec<_> = std::fs::read_dir(&dir)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .collect();
+            paths.sort();
+            for path in paths {
+                let Ok(content) = std::fs::read_to_string(&path) else { continue };
+                let seen = *offsets
+                    .entry(path.clone())
+                    .or_insert_with(|| if all { 0 } else { content.lines().count() });
+                let mut count = 0;
+                for (i, line) in content.lines().enumerate() {
+                    count = i + 1;
+                    if i < seen {
+                        continue;
+                    }
+                    if let Ok(store::Entry::Msg { msg }) = serde_json::from_str::<store::Entry>(line) {
+                        if json {
+                            println!("{}", serde_json::to_string(&msg).unwrap_or_default());
+                        } else {
+                            println!("[{}] {} → {}: {}", store::clock(msg.ts), msg.from, msg.to, msg.body);
+                        }
+                    }
+                }
+                offsets.insert(path, count);
             }
         }
+        thread::sleep(Duration::from_millis(200));
     }
 }
 

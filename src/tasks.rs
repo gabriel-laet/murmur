@@ -13,6 +13,14 @@ use crate::store::{self, Store};
 
 pub const STATES: [&str; 3] = ["todo", "doing", "done"];
 
+fn precedence(state: &str) -> u8 {
+    match state {
+        "done" => 3,
+        "doing" => 2,
+        _ => 1,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -179,6 +187,43 @@ impl Store {
         let path = self.task_dir(state).join(format!("{}.json", task.id));
         anyhow::ensure!(path.exists(), "task {} is no longer in {}", task.id, state);
         fs::write(&path, serde_json::to_vec(task)?)?;
+        Ok(())
+    }
+
+    /// Merge a task copy from another node. Precedence: done > doing > todo
+    /// (work only moves forward). A doing-vs-doing conflict — two nodes took
+    /// the same task during a partition — resolves deterministically: the
+    /// lexicographically smaller holder keeps it, on both sides, so the
+    /// loser's `task done` fails visibly and it moves on.
+    pub fn merge_task(&self, incoming_state: &str, incoming: Task) -> Result<()> {
+        self.task_init()?;
+        let local = STATES.iter().find_map(|s| {
+            let path = self.task_dir(s).join(format!("{}.json", incoming.id));
+            fs::read(&path)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Task>(&b).ok())
+                .map(|t| (s.to_string(), t))
+        });
+        let (win_state, winner) = match &local {
+            None => (incoming_state.to_string(), incoming),
+            Some((local_state, local_task)) => {
+                let (lp, ip) = (precedence(local_state), precedence(incoming_state));
+                let doing_conflict_loss = ip == lp
+                    && incoming_state == "doing"
+                    && incoming.taken_by < local_task.taken_by;
+                if ip > lp || doing_conflict_loss {
+                    (incoming_state.to_string(), incoming)
+                } else {
+                    return Ok(()); // local copy stands
+                }
+            }
+        };
+        for state in STATES {
+            let _ = fs::remove_file(self.task_dir(state).join(format!("{}.json", winner.id)));
+        }
+        let tmp = self.root().join("tmp").join(format!("merge-{}", winner.id));
+        fs::write(&tmp, serde_json::to_vec(&winner)?)?;
+        fs::rename(&tmp, self.task_dir(&win_state).join(format!("{}.json", winner.id)))?;
         Ok(())
     }
 

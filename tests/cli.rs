@@ -359,6 +359,128 @@ esac
     assert!(calls.contains("s-co"), "moved to completed in Linear");
 }
 
+fn sync(from: &PathBuf, to: &std::path::Path) -> Output {
+    murmur(from, &["sync", &to.display().to_string()])
+}
+
+#[test]
+fn sync_delivers_messages_across_stores() {
+    let a = fresh_dir("sync-a");
+    let b = fresh_dir("sync-b");
+    murmur(&a, &["send", "bob", "hello across nodes", "--as", "alice"]);
+    let out = sync(&a, &b);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = murmur(&b, &["inbox", "--as", "bob"]);
+    assert!(stdout(&out).contains("alice: hello across nodes"));
+    // the merged log is visible on b too
+    let out = murmur(&b, &["log", "-n", "10"]);
+    assert!(stdout(&out).contains("hello across nodes"));
+}
+
+#[test]
+fn consumed_messages_never_resurrect() {
+    let a = fresh_dir("tomb-a");
+    let b = fresh_dir("tomb-b");
+    murmur(&a, &["send", "bob", "read me once", "--as", "alice"]);
+    sync(&a, &b);
+    // bob reads on b — this writes a tombstone into b's log
+    let out = murmur(&b, &["inbox", "--as", "bob"]);
+    assert!(stdout(&out).contains("read me once"));
+    // tombstone flows back to a and kills a's materialized copy
+    sync(&a, &b);
+    assert!(stdout(&murmur(&a, &["inbox", "--as", "bob"])).is_empty(), "consumed on b, gone on a");
+    // and a third sync doesn't bring it back anywhere
+    sync(&a, &b);
+    assert!(stdout(&murmur(&a, &["inbox", "--as", "bob"])).is_empty());
+    assert!(stdout(&murmur(&b, &["inbox", "--as", "bob"])).is_empty());
+}
+
+#[test]
+fn sync_relays_through_intermediate_nodes() {
+    let a = fresh_dir("relay-a");
+    let b = fresh_dir("relay-b");
+    let c = fresh_dir("relay-c");
+    murmur(&a, &["send", "carol", "via b", "--as", "alice"]);
+    sync(&a, &b);
+    sync(&b, &c); // c never talks to a
+    let out = murmur(&c, &["inbox", "--as", "carol"]);
+    assert!(stdout(&out).contains("alice: via b"), "entry relayed a→b→c: {}", stdout(&out));
+}
+
+#[test]
+fn sync_merges_presence_and_claims() {
+    let a = fresh_dir("state-a");
+    let b = fresh_dir("state-b");
+    murmur(&a, &["join", "alice"]);
+    murmur(&a, &["claim", "/repo/src/core.rs", "--as", "alice"]);
+    sync(&a, &b);
+    let out = murmur(&b, &["who"]);
+    assert!(stdout(&out).contains("alice"));
+    assert!(stdout(&out).contains("remote"), "alice shows as remote on b: {}", stdout(&out));
+    // claim crossed too: bob is denied on b
+    let out = murmur(&b, &["claim", "/repo/src/core.rs", "--as", "bob"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("claimed by alice"));
+}
+
+#[test]
+fn contested_task_across_nodes_resolves_deterministically() {
+    let a = fresh_dir("conflict-a");
+    let b = fresh_dir("conflict-b");
+    murmur(&a, &["task", "add", "the contested one", "--as", "lead"]);
+    sync(&a, &b);
+    // partition: both sides take it
+    murmur(&a, &["task", "take", "--as", "zed"]);
+    murmur(&b, &["task", "take", "--as", "alpha"]);
+    sync(&a, &b);
+    // smaller holder name wins on BOTH sides
+    for store in [&a, &b] {
+        let out = murmur(store, &["task", "list", "--json"]);
+        let tasks: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+        assert_eq!(tasks[0]["taken_by"], "alpha", "on {}: {}", store.display(), stdout(&out));
+        assert_eq!(tasks[0]["state"], "doing");
+    }
+    // the loser's done fails visibly; the winner's flows through
+    let out = murmur(&a, &["task", "list", "--json"]);
+    let id = serde_json::from_str::<serde_json::Value>(&stdout(&out)).unwrap()[0]["id"]
+        .as_str().unwrap().to_string();
+    let out = murmur(&a, &["task", "done", &id, "--as", "zed"]);
+    assert!(!out.status.success());
+    let out = murmur(&b, &["task", "done", &id, "--as", "alpha"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    sync(&a, &b);
+    let out = murmur(&a, &["task", "list", "--all", "--json"]);
+    let tasks: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(tasks[0]["state"], "done", "completion syncs back: {}", stdout(&out));
+}
+
+#[test]
+fn sync_over_stdio_pipes_like_ssh() {
+    use std::os::unix::fs::PermissionsExt;
+    let a = fresh_dir("ssh-a");
+    let b = fresh_dir("ssh-b");
+    // stand-in for ssh: drop the host arg, run the murmur binary directly
+    let stub = a.parent().unwrap().join("fake-ssh.sh");
+    std::fs::write(
+        &stub,
+        format!("#!/bin/sh\nshift\nshift\nexec \"{}\" \"$@\"\n", bin()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    murmur(&a, &["send", "bob", "over the wire", "--as", "alice"]);
+    let out = Command::new(bin())
+        .args(["sync", &format!("fakehost:{}", b.display())])
+        .env("MURMUR_DIR", &a)
+        .env("MURMUR_SYNC_SSH", &stub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("sent 1 entries"), "{}", stdout(&out));
+    let out = murmur(&b, &["inbox", "--as", "bob"]);
+    assert!(stdout(&out).contains("alice: over the wire"));
+}
+
 #[test]
 fn setup_is_idempotent_and_merges() {
     let dir = fresh_dir("setup");

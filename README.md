@@ -115,6 +115,34 @@ Identity comes from `--as <name>` or the `MURMUR_AGENT` environment variable.
 State lives in `.murmur/`, discovered like `.git` by walking up from the
 current directory (override with `MURMUR_DIR`). It ignores itself in git.
 
+## Remote: sync, not servers
+
+Murmur crosses machines by reconciling `.murmur/` directories, not by opening
+ports. Each node appends to its own log; a sync exchanges what the other side
+is missing, merges state, and rebuilds inboxes. No daemon anywhere, nothing
+whose death loses data:
+
+```bash
+# over ssh — auth, encryption, and revocation are your existing ssh keys
+murmur sync dev@buildbox:work/myrepo
+
+# or any path two machines can both see (shared volume, sshfs, second checkout)
+murmur sync /mnt/shared/myrepo
+```
+
+Sync is idempotent and relays: A↔B then B↔C gives C everything from A, because
+logs are per-origin-node. Consumed messages leave tombstones, so mail read on
+one machine disappears everywhere and never resurrects. `murmur who` shows
+remote agents with their node; broadcasts reach them once presence has synced;
+`murmur watch` shows cluster-wide chatter. Run a sync by hand, from a hook, or
+on a cron — at agent timescales, once per turn is live enough.
+
+Honest physics: there is no atomic rename across machines. If two nodes take
+the same task during a partition, the conflict resolves deterministically on
+sync (lexicographically smaller holder keeps it, on both sides) and the
+loser's `task done` fails visibly. Trust is git-pull-style: syncing with a
+host means trusting it — pick your peers the way you pick your git remotes.
+
 ## Secrets: references, never values
 
 The bus is plaintext files, so secret *values* never touch it. Secrets are
@@ -251,6 +279,7 @@ murmur secret resolve <ref>           # resolve to stdout (prefer exec)
 murmur log [-n N]          # recent message history
 murmur watch               # follow all traffic live (--all for history)
 murmur clean               # prune dead agents + expired claims (--all: rm .murmur)
+murmur sync <peer>         # reconcile with another .murmur (path or user@host[:path])
 murmur setup               # wire hooks + MCP into this repo
 murmur mcp                 # MCP server over stdio
 murmur hook                # Claude Code hook adapter

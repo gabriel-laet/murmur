@@ -147,12 +147,19 @@ Data-model changes required regardless of transport:
 
 Transport phases:
 
-- **Phase 0 (works today)**: any synced filesystem — NFS, sshfs, Syncthing, a
-  shared container volume. Needs only the per-node log split.
-- **Phase 1 — `murmur sync <host>`**: one-shot anti-entropy over ssh, the way
-  git rides ssh: `ssh host murmur sync --stdio`, exchange seen-vectors,
-  stream missing entries. No daemon, no ports, no new auth surface. Hooks
-  trigger a sync each agent turn — at agent timescales, that is live enough.
+- **Phase 0 (built)**: any synced filesystem — NFS, sshfs, Syncthing, a
+  shared container volume — or `murmur sync <path>` against a directory both
+  machines can see.
+- **Phase 1 — `murmur sync <host>` (built)**: one-shot anti-entropy over ssh,
+  the way git rides ssh: `ssh host murmur sync --stdio`, exchange
+  seen-vectors (per-node line counts — the line number is the sequence
+  number), stream missing entries, merge state, rebuild inboxes with
+  tombstone suppression. No daemon, no ports, no new auth surface; trust is
+  git-pull-style (syncing with a host means trusting it). Relay works
+  because logs are per-origin: A↔B, B↔C gives C everything from A.
+  Per-entry signatures for *transitive* provenance (trusting A's entries
+  relayed via B without trusting B) arrive with phase 2's keypairs; over
+  direct ssh, the peer is already authenticated by ssh itself.
 - **Phase 2 — `murmur peer`**: a per-machine replicator daemon (QUIC,
   LAN discovery, ticket invites) for push-latency sync, bound to private
   interfaces only. The rule that keeps it from becoming v1's orchestrator:
