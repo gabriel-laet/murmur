@@ -293,6 +293,73 @@ fn inbox_flags_secret_references_without_resolving() {
 }
 
 #[test]
+fn linear_sync_pulls_pushes_and_stays_idempotent() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = fresh_dir("linear");
+    let base = store.parent().unwrap();
+    let log = base.join("linear-calls.log");
+    let stub = base.join("linear-stub.sh");
+    std::fs::write(
+        &stub,
+        format!(
+            r#"#!/bin/sh
+body=$(cat)
+printf '%s\n' "$body" >> "{log}"
+case "$body" in
+  *'teams(filter'*)
+    echo '{{"data":{{"teams":{{"nodes":[{{"id":"t1","states":{{"nodes":[{{"id":"s-un","name":"Todo","type":"unstarted"}},{{"id":"s-st","name":"In Progress","type":"started"}},{{"id":"s-co","name":"Done","type":"completed"}}]}}}}]}}}}}}' ;;
+  *'issues(filter'*)
+    echo '{{"data":{{"issues":{{"nodes":[{{"id":"uuid-42","identifier":"ENG-42","title":"Fix login flow","description":"Users bounce on refresh.","url":"https://linear.app/acme/issue/ENG-42"}}]}}}}}}' ;;
+  *)
+    echo '{{"data":{{"issueUpdate":{{"success":true}},"commentCreate":{{"success":true}}}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sync = || {
+        Command::new(bin())
+            .args(["task", "sync", "linear", "--team", "ENG"])
+            .env("MURMUR_DIR", &store)
+            .env("MURMUR_LINEAR_CURL", &stub)
+            .env("LINEAR_API_KEY", "test-key")
+            .output()
+            .unwrap()
+    };
+
+    // pull: the issue lands on the board once, with a readable id
+    let out = sync();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("pulled 1"));
+    let out = sync();
+    assert!(stdout(&out).contains("pulled 0"), "re-sync must not duplicate");
+    let out = murmur(&store, &["task", "list"]);
+    assert!(stdout(&out).contains("linear-ENG-42"));
+    assert!(stdout(&out).contains("Fix login flow"));
+
+    // take, then sync pushes started + an attributed comment, exactly once
+    let out = murmur(&store, &["task", "take", "--as", "worker-1"]);
+    assert!(stdout(&out).contains("linear.app/acme/issue/ENG-42"), "url surfaces on take");
+    let out = sync();
+    assert!(stdout(&out).contains("pushed 1"));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("s-st"), "moved to started in Linear");
+    assert!(calls.contains("worker-1"), "comment attributes the agent");
+    let out = sync();
+    assert!(stdout(&out).contains("pushed 0"), "push is idempotent");
+
+    // done flows through as completed
+    murmur(&store, &["task", "done", "linear-ENG-42", "--as", "worker-1"]);
+    let out = sync();
+    assert!(stdout(&out).contains("pushed 1"));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("s-co"), "moved to completed in Linear");
+}
+
+#[test]
 fn setup_is_idempotent_and_merges() {
     let dir = fresh_dir("setup");
     let workdir = dir.parent().unwrap().to_path_buf();

@@ -1,5 +1,6 @@
 mod commands;
 mod hook;
+mod linear;
 mod mcp;
 mod secrets;
 mod setup;
@@ -203,6 +204,17 @@ enum TaskCmd {
         #[arg(long = "as", value_name = "NAME")]
         r#as: Option<String>,
     },
+    /// Reconcile the board with an external tracker (currently: linear)
+    Sync {
+        /// Adapter name (linear)
+        backend: String,
+        /// Team key, e.g. ENG (or $LINEAR_TEAM)
+        #[arg(long)]
+        team: Option<String>,
+        /// Only pull issues carrying this label
+        #[arg(long)]
+        label: Option<String>,
+    },
 }
 
 fn main() {
@@ -235,6 +247,7 @@ fn run() -> anyhow::Result<()> {
             TaskCmd::Take { r#as, json } => commands::task_take(r#as, json),
             TaskCmd::Done { id, r#as } => commands::task_done(&id, r#as),
             TaskCmd::Drop { id, r#as } => commands::task_drop(&id, r#as),
+            TaskCmd::Sync { backend, team, label } => commands::task_sync(&backend, team, label),
         },
         Command::Secret { cmd } => match cmd {
             SecretCmd::Resolve { reference } => commands::secret_resolve(&reference),

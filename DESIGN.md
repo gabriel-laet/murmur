@@ -48,6 +48,7 @@ already owns them is available:
 | Remote, phase 2     | private networks (Tailscale, WireGuard)  | bind private interfaces **only** |
 | Mesh membership     | tailnet ACLs                             | thin node allowlist on top       |
 | Secret values       | the secret manager (Infisical, …)        | transport references, not values |
+| Task planning       | the tracker (Linear, …)                  | sync adapter; board stays kernel |
 
 Two things do belong in the kernel:
 
@@ -102,6 +103,23 @@ Invariants:
 Adding a backend is one match arm that shells out to its CLI (`vault`, `op`,
 `aws secretsmanager`, …). Backends must be explicitly known — refs never
 execute arbitrary commands, because message bodies are attacker-controlled.
+
+## Trackers: adapters, not replacements
+
+The same delegation applies to task planning. `murmur task sync linear`
+reconciles the board with Linear bidirectionally and idempotently: open
+issues pull onto the board as `linear-<identifier>` tasks; local transitions
+push back as workflow-state changes with an attributed comment (take →
+started, done → completed, drop → unstarted). A `synced_state` field in the
+task file records what the tracker has already been told, so pushes never
+repeat and re-pulls never duplicate.
+
+The split: the tracker owns planning, priorities, the human UI, and history.
+The board owns the agent mechanics — atomic take, holder-checked completion —
+because those need filesystem atomicity, not an HTTP round-trip. Transport is
+`curl` against the tracker's API (the same "use the ubiquitous tool" move as
+the filesystem and ssh); credentials come from the environment and are never
+stored. Other trackers (GitHub Issues, Jira) are the same adapter shape.
 
 ## Remote: replication, not networking (roadmap)
 

@@ -71,6 +71,25 @@ Point N agents at the same board and they self-organize: each takes a task,
 works, completes, takes the next. The hook tells idle agents when the board
 has open work.
 
+### Linear adapter
+
+Humans plan in Linear; agents execute on the board; status flows back:
+
+```bash
+export LINEAR_API_KEY=lin_api_...
+murmur task sync linear --team ENG --label agents
+```
+
+Sync is bidirectional and idempotent — run it by hand, from a hook, or on a
+cron. Open issues (optionally filtered by label) land on the board as
+`linear-ENG-42`-style tasks, so `murmur task done linear-ENG-42` reads
+naturally and re-syncs never duplicate. Local transitions push back as
+workflow-state changes with an attributed comment: take → *In Progress*
+("Taken by agent `worker-1` via murmur"), done → *Done*, drop → back to
+*Todo*. Linear keeps planning, priorities, and history; the board keeps the
+atomic-take mechanics. Transport is `curl` against Linear's GraphQL API — no
+SDK, and the key never touches disk.
+
 ## Request/reply
 
 Messages are one-way by default, but `--reply` turns one into a blocking
@@ -226,6 +245,7 @@ murmur claim <path>        # advisory claim (--ttl secs)
 murmur release <path>      # release a claim
 murmur claims              # list active claims
 murmur task add|list|take|done|drop   # shared work queue
+murmur task sync linear --team ENG    # reconcile the board with Linear
 murmur secret exec NAME=<ref> -- cmd  # resolve secret refs into a command's env
 murmur secret resolve <ref>           # resolve to stdout (prefer exec)
 murmur log [-n N]          # recent message history

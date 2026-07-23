@@ -26,6 +26,14 @@ pub struct Task {
     pub taken_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_by: Option<String>,
+    /// backend-side id when this task mirrors an external tracker (Linear issue uuid)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_url: Option<String>,
+    /// last local state pushed to the external tracker
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synced_state: Option<String>,
 }
 
 impl Store {
@@ -54,6 +62,9 @@ impl Store {
             ts,
             taken_by: None,
             done_by: None,
+            external_id: None,
+            external_url: None,
+            synced_state: None,
         };
         let tmp = self.root().join("tmp").join(format!("task-{}", task.id));
         fs::write(&tmp, serde_json::to_vec(&task)?)?;
@@ -146,6 +157,29 @@ impl Store {
         fs::write(&dest, serde_json::to_vec(&task)?)?;
         fs::remove_file(&path)?;
         Ok(task)
+    }
+
+    /// Import an externally-sourced task onto the board unless a task with
+    /// that id already exists in any state. Returns whether it was new.
+    pub fn task_import(&self, task: Task) -> Result<bool> {
+        self.task_init()?;
+        let file = format!("{}.json", task.id);
+        if STATES.iter().any(|s| self.task_dir(s).join(&file).exists()) {
+            return Ok(false);
+        }
+        let tmp = self.root().join("tmp").join(&file);
+        fs::write(&tmp, serde_json::to_vec(&task)?)?;
+        fs::rename(&tmp, self.task_dir("todo").join(&file))?;
+        Ok(true)
+    }
+
+    /// Rewrite a task's file in place (bookkeeping fields only — state
+    /// changes go through take/done/drop).
+    pub fn task_rewrite(&self, state: &str, task: &Task) -> Result<()> {
+        let path = self.task_dir(state).join(format!("{}.json", task.id));
+        anyhow::ensure!(path.exists(), "task {} is no longer in {}", task.id, state);
+        fs::write(&path, serde_json::to_vec(task)?)?;
+        Ok(())
     }
 
     fn find_task(&self, state: &str, id_prefix: &str) -> Result<(PathBuf, Task)> {

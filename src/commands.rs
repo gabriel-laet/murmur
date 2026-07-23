@@ -296,6 +296,9 @@ pub fn task_take(name: Option<String>, json: bool) -> Result<()> {
                 if !task.body.is_empty() {
                     println!("  {}", task.body);
                 }
+                if let Some(url) = &task.external_url {
+                    println!("  {}", url);
+                }
                 println!("  when finished: murmur task done {} --as {}", task.id, name);
             }
             Ok(())
@@ -316,6 +319,14 @@ pub fn task_drop(id: &str, name: Option<String>) -> Result<()> {
     let task = Store::locate()?.task_drop(&name, id)?;
     println!("back on the board: {}  {}", task.id, task.title);
     Ok(())
+}
+
+pub fn task_sync(backend: &str, team: Option<String>, label: Option<String>) -> Result<()> {
+    anyhow::ensure!(backend == "linear", "unknown task backend '{}' (supported: linear)", backend);
+    let team = team
+        .or_else(|| std::env::var("LINEAR_TEAM").ok())
+        .context("which team? pass --team ENG or set LINEAR_TEAM")?;
+    crate::linear::sync(&team, label.as_deref())
 }
 
 /// Prints the value to stdout. `exec` is the safer path — values in a
