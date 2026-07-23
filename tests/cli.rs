@@ -230,6 +230,69 @@ fn inbox_wait_blocks_until_delivery() {
 }
 
 #[test]
+fn secret_exec_injects_env_without_printing() {
+    let store = fresh_dir("secret-exec");
+    let out = Command::new(bin())
+        .args([
+            "secret", "exec", "INJECTED=secret://env/MURMUR_TEST_SRC",
+            "--", "sh", "-c", "printf %s \"$INJECTED\"",
+        ])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_TEST_SRC", "hunter2")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "hunter2");
+}
+
+#[test]
+fn secret_exec_propagates_exit_codes() {
+    let store = fresh_dir("secret-exit");
+    let out = Command::new(bin())
+        .args(["secret", "exec", "X=secret://env/MURMUR_TEST_SRC", "--", "sh", "-c", "exit 3"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_TEST_SRC", "v")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+}
+
+#[test]
+fn secret_resolve_fails_on_unknown_backend_and_missing_var() {
+    let store = fresh_dir("secret-errors");
+    let out = murmur(&store, &["secret", "resolve", "secret://vault/x/KEY"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("unknown secret backend"));
+    let out = Command::new(bin())
+        .args(["secret", "resolve", "secret://env/MURMUR_DEFINITELY_UNSET"])
+        .env("MURMUR_DIR", &store)
+        .env_remove("MURMUR_DEFINITELY_UNSET")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+}
+
+#[test]
+fn inbox_flags_secret_references_without_resolving() {
+    let store = fresh_dir("secret-inbox");
+    murmur(
+        &store,
+        &["send", "bob", "db creds: secret://infisical/proj/dev/DATABASE_URL", "--as", "alice"],
+    );
+    let out = Command::new(bin())
+        .args(["inbox", "--as", "bob"])
+        .env("MURMUR_DIR", &store)
+        .env("DATABASE_URL", "must-not-appear")
+        .output()
+        .unwrap();
+    let text = stdout(&out);
+    assert!(text.contains("secret://infisical/proj/dev/DATABASE_URL"), "ref itself is delivered");
+    assert!(text.contains("secret reference"), "annotation present");
+    assert!(text.contains("murmur secret exec"), "points at the safe path");
+    assert!(!text.contains("must-not-appear"), "value was never resolved");
+}
+
+#[test]
 fn setup_is_idempotent_and_merges() {
     let dir = fresh_dir("setup");
     let workdir = dir.parent().unwrap().to_path_buf();

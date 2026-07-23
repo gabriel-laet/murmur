@@ -81,6 +81,11 @@ fn print_msgs(msgs: &[Msg], json: bool) {
                     msg.from, msg.id
                 );
             }
+            if crate::secrets::contains_ref(&msg.body) {
+                println!(
+                    "  ⚿ contains secret reference(s) — resolve explicitly with `murmur secret exec NAME=<ref> -- <cmd>` (refs grant nothing; your own backend credentials are required)"
+                );
+            }
         }
     }
 }
@@ -311,6 +316,31 @@ pub fn task_drop(id: &str, name: Option<String>) -> Result<()> {
     let task = Store::locate()?.task_drop(&name, id)?;
     println!("back on the board: {}  {}", task.id, task.title);
     Ok(())
+}
+
+/// Prints the value to stdout. `exec` is the safer path — values in a
+/// terminal end up in scrollback, logs, and agent context.
+pub fn secret_resolve(reference: &str) -> Result<()> {
+    let value = crate::secrets::resolve(reference)?;
+    eprintln!("note: value printed to stdout — prefer `murmur secret exec NAME=<ref> -- <cmd>`");
+    println!("{}", value);
+    Ok(())
+}
+
+/// Resolve refs into the child's environment and run it. The values never
+/// touch stdout, the log, or an agent's context.
+pub fn secret_exec(pairs: Vec<String>, command: Vec<String>) -> Result<()> {
+    anyhow::ensure!(!command.is_empty(), "no command given (use: murmur secret exec NAME=<ref> -- <cmd>)");
+    let mut cmd = std::process::Command::new(&command[0]);
+    cmd.args(&command[1..]);
+    for pair in &pairs {
+        let (name, reference) = pair
+            .split_once('=')
+            .with_context(|| format!("expected NAME=secret://..., got '{}'", pair))?;
+        cmd.env(name, crate::secrets::resolve(reference)?);
+    }
+    let status = cmd.status().with_context(|| format!("failed to run '{}'", command[0]))?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 pub fn clean(all: bool) -> Result<()> {

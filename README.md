@@ -1,6 +1,11 @@
 # murmur
 
-Local message passing for AI agents. A directory of files, not a daemon.
+The communication kernel for AI agents. A directory of files, not a daemon.
+
+Murmur doesn't orchestrate agents and doesn't secure networks — it gives agents
+mechanism (messaging, presence, claims, a task board, secret references) built
+on the trust you already have: your filesystem, your ssh keys, your private
+network, your secret manager. Design and remote/p2p roadmap: [DESIGN.md](DESIGN.md).
 
 Agents are intermittent — they exist for a few seconds between tool calls, then
 they're gone until the next turn. Sockets, brokers, and HTTP all assume someone
@@ -90,6 +95,28 @@ back into a plain durable message.
 Identity comes from `--as <name>` or the `MURMUR_AGENT` environment variable.
 State lives in `.murmur/`, discovered like `.git` by walking up from the
 current directory (override with `MURMUR_DIR`). It ignores itself in git.
+
+## Secrets: references, never values
+
+The bus is plaintext files, so secret *values* never touch it. Secrets are
+first-class as **references** — ordinary text that grants nothing by itself:
+
+```bash
+# alice shares where a secret lives (Infisical-native), not the secret
+murmur send bob "DB creds: secret://infisical/proj-123/dev/DATABASE_URL" --as alice
+
+# bob resolves at his edge, with HIS OWN Infisical identity (INFISICAL_TOKEN etc).
+# The value goes straight into the child env — never stdout, never agent context:
+murmur secret exec DATABASE_URL=secret://infisical/proj-123/dev/DATABASE_URL -- psql
+```
+
+If bob's identity can't read that secret, resolution fails at his edge by
+Infisical's policy — that's the system working. Access control, rotation, and
+audit stay in the secret manager; murmur shells out to the `infisical` CLI and
+never stores a secret byte. Hooks and MCP never auto-resolve: a ref arriving
+in an agent's context is labeled "never resolve this into your context."
+A `secret://env/<VAR>` backend covers the trivial local case; more backends
+are one match arm each. See [DESIGN.md](DESIGN.md) for the invariants.
 
 ## Claude Code integration
 
@@ -199,6 +226,8 @@ murmur claim <path>        # advisory claim (--ttl secs)
 murmur release <path>      # release a claim
 murmur claims              # list active claims
 murmur task add|list|take|done|drop   # shared work queue
+murmur secret exec NAME=<ref> -- cmd  # resolve secret refs into a command's env
+murmur secret resolve <ref>           # resolve to stdout (prefer exec)
 murmur log [-n N]          # recent message history
 murmur watch               # follow all traffic live (--all for history)
 murmur clean               # prune dead agents + expired claims (--all: rm .murmur)

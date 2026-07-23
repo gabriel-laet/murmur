@@ -1,6 +1,7 @@
 mod commands;
 mod hook;
 mod mcp;
+mod secrets;
 mod setup;
 mod store;
 mod tasks;
@@ -134,12 +135,35 @@ enum Command {
         #[command(subcommand)]
         cmd: TaskCmd,
     },
+    /// Secret references: pass secrets between agents without the values ever touching the bus
+    Secret {
+        #[command(subcommand)]
+        cmd: SecretCmd,
+    },
     /// Wire this repo for agent coordination (.claude/settings.json hooks + .mcp.json)
     Setup,
     /// MCP server over stdio (messaging, claims, and task tools)
     Mcp,
     /// Claude Code hook adapter (reads hook JSON on stdin)
     Hook,
+}
+
+#[derive(Subcommand)]
+enum SecretCmd {
+    /// Resolve a secret:// reference and print the value (prefer `exec`)
+    Resolve {
+        /// e.g. secret://infisical/<projectId>/<env>/[folders/]<NAME> or secret://env/<VAR>
+        reference: String,
+    },
+    /// Resolve refs into a command's environment and run it — values never touch stdout or context
+    Exec {
+        /// NAME=secret://... pairs to inject as environment variables
+        #[arg(required = true)]
+        pairs: Vec<String>,
+        /// The command to run (after --)
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -211,6 +235,10 @@ fn run() -> anyhow::Result<()> {
             TaskCmd::Take { r#as, json } => commands::task_take(r#as, json),
             TaskCmd::Done { id, r#as } => commands::task_done(&id, r#as),
             TaskCmd::Drop { id, r#as } => commands::task_drop(&id, r#as),
+        },
+        Command::Secret { cmd } => match cmd {
+            SecretCmd::Resolve { reference } => commands::secret_resolve(&reference),
+            SecretCmd::Exec { pairs, command } => commands::secret_exec(pairs, command),
         },
         Command::Setup => setup::run(),
         Command::Mcp => mcp::run(),

@@ -104,14 +104,18 @@ fn call_tool(tool: &str, args: &Value, name: &str) -> Result<String> {
                 Ok(msgs
                     .iter()
                     .map(|m| {
-                        if m.wants_reply {
+                        let mut line = if m.wants_reply {
                             format!(
                                 "[{}] {}: {} (reply expected — use send_message with reply_to={})",
                                 store::clock(m.ts), m.from, m.body, m.id
                             )
                         } else {
                             format!("[{}] {}: {}", store::clock(m.ts), m.from, m.body)
+                        };
+                        if crate::secrets::contains_ref(&m.body) {
+                            line.push_str(" [contains a secret:// reference — never resolve it into context; run `murmur secret exec NAME=<ref> -- <command>` instead]");
                         }
+                        line
                     })
                     .collect::<Vec<_>>()
                     .join("\n"))

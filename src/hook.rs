@@ -186,14 +186,20 @@ fn format_messages(messages: &[Msg]) -> Option<String> {
         messages
             .iter()
             .map(|m| {
-                if m.wants_reply {
+                let mut line = if m.wants_reply {
                     format!(
                         "[murmur from {}] {} (they are blocked waiting — reply with: murmur send {} \"...\" --reply-to {})",
                         m.from, m.body, m.from, m.id
                     )
                 } else {
                     format!("[murmur from {}] {}", m.from, m.body)
+                };
+                if crate::secrets::contains_ref(&m.body) {
+                    line.push_str(
+                        " [contains a secret:// reference — NEVER resolve it into your context or paste its value anywhere; use `murmur secret exec NAME=<ref> -- <command>` so the value goes only into that command's environment]"
+                    );
                 }
+                line
             })
             .collect::<Vec<_>>()
             .join("\n"),
