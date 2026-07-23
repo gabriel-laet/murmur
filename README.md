@@ -1,6 +1,16 @@
 # murmur
 
-Dead-simple local IPC for AI agents. Unix sockets, newline-delimited messages. No HTTP, no auth, no fluff.
+Local message passing for AI agents. A directory of files, not a daemon.
+
+Agents are intermittent — they exist for a few seconds between tool calls, then
+they're gone until the next turn. Sockets, brokers, and HTTP all assume someone
+is listening *right now*. The filesystem doesn't. So in murmur, a message is a
+file atomically renamed into the recipient's inbox, where it waits until they
+read it. Presence is a file. File claims are files. The whole system is a
+`.murmur/` directory you can inspect with `ls` and `cat`, and any agent that
+can read and write files can participate — even without murmur installed.
+
+No daemon. No sockets. No ports. No auth. Nothing to keep alive.
 
 ## Install
 
@@ -8,203 +18,152 @@ Dead-simple local IPC for AI agents. Unix sockets, newline-delimited messages. N
 cargo install --path .
 ```
 
-## Quick Start
+## Quick start
 
 ```bash
-# Start a channel (first caller becomes host, stays running)
-murmur mychannel
+# Announce yourself (optional — sending or reading mail also registers you)
+murmur join backend
 
-# In another terminal, send messages
-murmur send mychannel "hello from agent-1"
-murmur send mychannel "another message"
+# Message a peer. They don't need to be running — it waits in their inbox.
+murmur send frontend "API is ready at /v2/users" --as backend
+
+# Broadcast to everyone
+murmur send '*' "rebasing main, hold your pushes" --as backend
+
+# Read your mail (consumes it); --wait blocks until something arrives
+murmur inbox --as frontend
+murmur inbox --as frontend --wait --timeout 120
+
+# Who's around?
+murmur who
+
+# Watch all agent chatter live (for the human running the show)
+murmur watch
 ```
 
-## Multi-Agent Coordination
+Identity comes from `--as <name>` or the `MURMUR_AGENT` environment variable.
+State lives in `.murmur/`, discovered like `.git` by walking up from the
+current directory (override with `MURMUR_DIR`). It ignores itself in git.
 
-Start the orchestrator, then agents coordinate automatically via editor hooks:
+## Claude Code integration
 
-```bash
-# Terminal 1 — start the orchestrator
-murmur orchestrate
+### Hooks (zero-config coordination)
 
-# Terminal 2 — spawn agents in tmux panes
-murmur spawn agent-1 -- claude
-murmur spawn agent-2 -- claude
-```
-
-Agents get file locking (no edit conflicts), message delivery (via `additionalContext` injection), and agent discovery — all through the hook system with zero config in the agent itself.
-
-### Hook Setup
-
-Add to `.claude/settings.json` (works for both Claude Code and Cursor):
+Add to `.claude/settings.json`:
 
 ```json
 {
   "hooks": {
-    "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "murmur hook"}]}],
-    "PostToolUse": [{"matcher": "Edit|Write", "hooks": [{"type": "command", "command": "murmur hook", "async": true}]}],
-    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "murmur hook", "async": true}]}]
+    "SessionStart": [{"hooks": [{"type": "command", "command": "murmur hook"}]}],
+    "PreToolUse":   [{"matcher": "", "hooks": [{"type": "command", "command": "murmur hook"}]}],
+    "PostToolUse":  [{"matcher": "Edit|Write", "hooks": [{"type": "command", "command": "murmur hook"}]}],
+    "Stop":         [{"hooks": [{"type": "command", "command": "murmur hook"}]}],
+    "SessionEnd":   [{"hooks": [{"type": "command", "command": "murmur hook"}]}]
   }
 }
 ```
 
-### MCP Server
+Then every Claude Code session in the workspace coordinates automatically:
 
-For agents that need to proactively send messages (not just receive via hooks):
+- **SessionStart** — the agent joins and is told its name and who else is here.
+- **PreToolUse** — pending messages are injected into the agent's context.
+  Editing a file claimed by another agent is denied with an explanation of who
+  holds it and how to coordinate. Free files are claimed automatically.
+- **PostToolUse** — claims are released after the edit.
+- **Stop** — an agent can't end its turn with unread mail; messages that
+  arrived mid-task are delivered as the block reason so it can act on them.
+- **SessionEnd** — the agent leaves and its claims are released.
+
+Set `MURMUR_AGENT=frontend` in the session's environment to pick your own
+name; otherwise one is derived from the session id.
+
+### MCP (proactive messaging)
+
+For agents that should *send* messages, not just receive them:
 
 ```json
 {
   "mcpServers": {
-    "murmur": { "command": "murmur", "args": ["mcp-server"] }
+    "murmur": {
+      "command": "murmur",
+      "args": ["mcp"],
+      "env": { "MURMUR_AGENT": "backend" }
+    }
   }
 }
 ```
 
-Exposes `send_message`, `check_messages`, `list_agents`, and `broadcast` tools.
+Exposes `send_message`, `broadcast`, `check_inbox`, `list_agents`,
+`claim_file`, and `release_file`.
 
-## Usage
+### No integration at all
 
-```bash
-# Connect to a channel (host mode if first, peer mode if exists)
-murmur mychannel
+Agents can also just run the CLI from their shell tool — or skip murmur
+entirely and read the files. The format *is* the protocol:
 
-# Listen on a channel (prints incoming messages to stdout, blocks)
-murmur listen mychannel
-
-# Send a message (retries for up to 5s if listener isn't up yet)
-murmur send mychannel "hello from agent-1"
-
-# Fail immediately if listener isn't up (no retry)
-murmur send --no-wait mychannel "hello"
-
-# Send and wait for a reply (one line back)
-murmur send --reply mychannel '{"cmd": "status"}'
-
-# Pipe stdin
-echo '{"task": "summarize", "id": 42}' | murmur send mychannel
-
-# Start the orchestrator (file locks, message queues, agent registry)
-murmur orchestrate
-
-# Editor hook (reads hook JSON from stdin, talks to orchestrator)
-murmur hook
-
-# MCP server over stdio (JSON-RPC 2.0)
-murmur mcp-server
-
-# Spawn an agent in a new tmux pane
-murmur spawn agent-2 -- claude
-
-# Housekeeping
-murmur ls                # list active channels
-murmur rm mychannel      # remove a channel socket
+```text
+.murmur/
+  agents/<name>.json     presence: pid, cwd, joined_at, last_seen
+  inbox/<name>/*.json    one file per pending message, oldest-first by name
+  claims/*.json          advisory file claims with TTLs
+  log.jsonl              append-only record of every message
+  tmp/                   staging for atomic renames
 ```
 
-## Examples
+A message is `{"id", "from", "to", "ts", "body"}`. To send one by hand: write
+the JSON to `tmp/`, then `mv` it into `inbox/<recipient>/`. The rename is
+atomic, so readers never see a partial message. `body` is an opaque string —
+plain text, JSON, whatever you and your peers agree on.
 
-### Agent-to-agent communication
+## File claims
 
-```bash
-# Terminal 1 — start a channel
-murmur work
-# Prints instructions, waits for connections, stays running
-
-# Terminal 2 — send messages
-murmur send work "summarize document.pdf"
-murmur send work "translate output to french"
-
-# Or join for bidirectional chat
-murmur work
-# Now both sides can send/receive, all messages broadcast to all peers
-```
-
-### Request/reply pattern
+Claims are advisory locks that stop parallel agents from stomping on each
+other's edits. They expire on their own (default 15 minutes), so a crashed
+agent can never deadlock the team.
 
 ```bash
-# Terminal 1 — agent listens and replies
-murmur listen tasks
-
-# Terminal 2 — send and get reply
-RESULT=$(murmur send --reply tasks '{"cmd": "summarize", "file": "doc.pdf"}')
-echo "Agent replied: $RESULT"
+murmur claim src/auth.rs --as backend       # yours for 15 min
+murmur claim src/auth.rs --as frontend      # error: claimed by backend
+murmur claims                                # list active claims
+murmur release src/auth.rs --as backend
 ```
 
-### Coordinated multi-agent workflow
+With the hook installed this is automatic around every Edit/Write.
+
+## All commands
 
 ```bash
-# Start orchestrator
-murmur orchestrate
-
-# Spawn two agents that auto-coordinate
-murmur spawn frontend -- claude --prompt "build the React UI for the auth page"
-murmur spawn backend -- claude --prompt "build the API endpoints for auth"
-
-# Send a message from one agent to another (via MCP or directly)
-echo '{"action":"send","from":"me","to":"frontend","message":"backend API is ready at /api/auth"}' \
-  | murmur send orchestrator
+murmur send <to> [msg]     # deliver a message ('*' = broadcast; stdin if no msg)
+murmur inbox               # read + consume your mail (--wait, --peek, --json)
+murmur who                 # list agents and liveness
+murmur join [name]         # register presence, see peers
+murmur leave               # deregister, release claims
+murmur claim <path>        # advisory claim (--ttl secs)
+murmur release <path>      # release a claim
+murmur claims              # list active claims
+murmur log [-n N]          # recent message history
+murmur watch               # follow all traffic live (--all for history)
+murmur clean               # prune dead agents + expired claims (--all: rm .murmur)
+murmur mcp                 # MCP server over stdio
+murmur hook                # Claude Code hook adapter
 ```
 
-File locking prevents conflicts — if `frontend` tries to edit a file `backend` is writing, the hook blocks with exit code 2 and tells it who holds the lock.
+## Design notes
 
-### Cursor + Claude Code on the same project
-
-Run both editors on the same codebase, coordinated through murmur:
-
-```bash
-# 1. Start the orchestrator
-murmur orchestrate
-
-# 2. Configure hooks in .claude/settings.json (both editors read this)
-cat > .claude/settings.json << 'EOF'
-{
-  "hooks": {
-    "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "murmur hook"}]}],
-    "PostToolUse": [{"matcher": "Edit|Write", "hooks": [{"type": "command", "command": "murmur hook", "async": true}]}],
-    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "murmur hook", "async": true}]}]
-  }
-}
-EOF
-
-# 3. Open Cursor on the project — its agent gets MURMUR_AGENT_ID from session
-#    Open Claude Code in a terminal — same hooks, same orchestrator
-
-# 4. Send a message from Claude Code's agent to Cursor's agent
-#    (via MCP tool, or directly)
-echo '{"action":"send","from":"claude","to":"cursor-session-abc","message":"I finished the API, you can start on the frontend now"}' \
-  | murmur send orchestrator
-
-# The next time Cursor's agent runs any tool, murmur hook injects the message
-# into additionalContext — the agent sees it as part of its context.
-```
-
-What happens automatically:
-- **File locking**: If Cursor tries to edit `src/auth.rs` while Claude Code is writing it, the hook exits 2 and tells Cursor who holds the lock. Cursor's agent retries or works on something else.
-- **Message delivery**: Messages sent to an agent queue up and get delivered on the next `PreToolUse` hook via `additionalContext`.
-- **Agent discovery**: Any agent can call `list_agents` (via MCP) to see who's active.
-
-### Using tmux to manage multiple agents
-
-```bash
-# Start orchestrator in its own pane, then spawn agents
-tmux new-session -d -s murmur 'murmur orchestrate'
-
-# Spawn Claude Code agents in new panes
-murmur spawn frontend -- claude --prompt "build the auth UI components"
-murmur spawn backend -- claude --prompt "build the auth API endpoints"
-murmur spawn tests -- claude --prompt "write integration tests for auth"
-
-# All three agents coordinate automatically:
-# - file locks prevent edit conflicts
-# - agents can message each other via MCP tools
-# - the orchestrator tracks who's active
-```
-
-## Protocol
-
-- Transport: Unix domain sockets at `/tmp/murmur-<channel>.sock` (canonicalized to `/private/tmp` on macOS)
-- Framing: newline-delimited (`\n` terminated)
-- Max message size: 1 MB
-- Encoding: opaque bytes — use text, JSON, base64, whatever you want
+- **Durable by default.** Sending to an agent that hasn't started yet works;
+  the message waits. This is the property agents actually need, and it's the
+  one thing a socket can't give you.
+- **Crash-safe.** All state is files; there is no process whose death loses
+  messages, locks, or the registry.
+- **Observable.** `murmur watch` (or `tail -f .murmur/log.jsonl`) shows every
+  message. Multi-agent systems fail silently without this.
+- **Polling, not push.** `--wait` and `watch` poll at 100–200 ms, which is
+  invisible at agent timescales and keeps the implementation dependency-free.
+- **Single machine by design** — though a shared volume between containers
+  works for free, which sockets never could.
+- **Liveness** is "is the pid that invoked murmur still alive", tracked via
+  the parent process, plus a `last_seen` timestamp. Good enough to answer
+  "is anyone actually there?" without heartbeats.
 
 ## License
 

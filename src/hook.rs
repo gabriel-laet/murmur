@@ -1,10 +1,27 @@
+//! Claude Code hook adapter. Wire `murmur hook` into settings.json and the
+//! agent coordinates with zero config:
+//!
+//! - SessionStart: join, learn who else is around
+//! - PreToolUse: inbox drained into additionalContext; Edit/Write on a file
+//!   claimed by another agent is denied with an explanation
+//! - PostToolUse (Edit/Write): release the claim
+//! - Stop: blocked if teammates messaged you mid-turn, so you see it before
+//!   ending the turn
+//! - SessionEnd: leave, releasing presence and claims
+//!
+//! Everything degrades gracefully: malformed input or a missing store exits 0
+//! so the hook never breaks the editor.
+
 use serde::Deserialize;
-use serde_json::Value;
-use std::process;
+use serde_json::{json, Value};
+use std::io::Read;
+use std::process::exit;
 
-use crate::protocol::{self, OrchestratorRequest};
+use crate::store::{ClaimResult, Msg, Store};
 
-#[derive(Deserialize)]
+const HOOK_CLAIM_TTL_SECS: u64 = 600;
+
+#[derive(Deserialize, Default)]
 struct HookInput {
     #[serde(alias = "hookEventName")]
     hook_event_name: Option<String>,
@@ -16,134 +33,159 @@ struct HookInput {
     session_id: Option<String>,
 }
 
-pub async fn run(channel: &str) -> anyhow::Result<()> {
-    // Read stdin (hook JSON)
+pub fn run() -> anyhow::Result<()> {
     let mut input = String::new();
-    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
+    std::io::stdin().read_to_string(&mut input)?;
+    let hook: HookInput = serde_json::from_str(&input).unwrap_or_default();
 
-    let hook: HookInput = match serde_json::from_str(&input) {
-        Ok(h) => h,
-        Err(_) => process::exit(0), // graceful degradation
-    };
+    let Some(event) = hook.hook_event_name.clone() else { exit(0) };
+    let Some(name) = agent_name(&hook) else { exit(0) };
+    let Ok(store) = Store::locate() else { exit(0) };
 
-    let agent_id = std::env::var("MURMUR_AGENT_ID")
-        .ok()
-        .or_else(|| hook.session_id.clone())
-        .unwrap_or_else(|| "unknown".into());
+    match event.as_str() {
+        "SessionStart" => session_start(&store, &name),
+        "PreToolUse" => pre_tool_use(&store, &name, &hook),
+        "PostToolUse" => post_tool_use(&store, &name, &hook),
+        "Stop" => stop(&store, &name),
+        "SessionEnd" => {
+            let _ = store.leave(&name);
+        }
+        _ => {}
+    }
+    Ok(())
+}
 
-    let event = match &hook.hook_event_name {
-        Some(e) => e.as_str(),
-        None => process::exit(0),
-    };
-
-    match event {
-        "PreToolUse" => handle_pre_tool_use(channel, &agent_id, &hook).await,
-        "PostToolUse" => handle_post_tool_use(channel, &agent_id, &hook).await,
-        "Stop" => handle_stop(channel, &agent_id).await,
-        _ => process::exit(0),
+/// `MURMUR_AGENT` if set, else a stable name derived from the session id.
+fn agent_name(hook: &HookInput) -> Option<String> {
+    if let Ok(name) = std::env::var("MURMUR_AGENT") {
+        return Some(name);
+    }
+    let session = hook.session_id.as_deref()?;
+    let short: String = session.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
+    if short.is_empty() {
+        None
+    } else {
+        Some(format!("agent-{}", short))
     }
 }
 
-async fn handle_pre_tool_use(
-    channel: &str,
-    agent_id: &str,
-    hook: &HookInput,
-) -> anyhow::Result<()> {
-    let mut additional_context = Vec::new();
-
-    // 1. Check for pending messages
-    let check = OrchestratorRequest::Check {
-        agent_id: agent_id.into(),
+fn session_start(store: &Store, name: &str) {
+    if store.touch(name).is_err() {
+        return;
+    }
+    let peers: Vec<String> = store
+        .agents()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| a.name)
+        .filter(|n| n != name)
+        .collect();
+    let peers_line = if peers.is_empty() {
+        "No other agents yet.".to_string()
+    } else {
+        format!("Other agents here: {}.", peers.join(", "))
     };
-    if let Ok(Some(resp)) = protocol::orchestrator_request(channel, &check).await {
-        if let Some(messages) = resp.messages {
-            for msg in &messages {
-                additional_context.push(format!("[murmur from {}] {}", msg.from, msg.message));
-            }
+    let context = format!(
+        "murmur: you are agent '{}'. {} Message a peer with `murmur send <peer> \"...\" --as {}` \
+         or broadcast with `murmur send '*' \"...\" --as {}`. Incoming messages appear in your \
+         context automatically.",
+        name, peers_line, name, name
+    );
+    emit(json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": context
         }
-    }
+    }));
+}
 
-    // 2. If tool is Edit/Write, try to lock the file
+fn pre_tool_use(store: &Store, name: &str, hook: &HookInput) {
+    let messages = store.drain(name, false).unwrap_or_default();
+    let context = format_messages(&messages);
+
+    // Advisory claim on Edit/Write targets: deny if someone else holds it.
     let tool = hook.tool_name.as_deref().unwrap_or("");
-    let file_path = extract_file_path(&hook.tool_input);
-
-    if matches!(tool, "Edit" | "Write") {
-        if let Some(path) = &file_path {
-            let lock = OrchestratorRequest::Lock {
-                agent_id: agent_id.into(),
-                path: path.clone(),
-            };
-            if let Ok(Some(resp)) = protocol::orchestrator_request(channel, &lock).await {
-                if resp.status == "denied" {
-                    let holder = resp.holder.as_deref().unwrap_or("another agent");
-                    eprintln!(
-                        "murmur: file {} is locked by {}",
-                        path, holder
-                    );
-                    process::exit(2);
+    if matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+        if let Some(path) = extract_file_path(&hook.tool_input) {
+            if let Ok(ClaimResult::Held(claim)) = store.claim(&path, name, HOOK_CLAIM_TTL_SECS) {
+                let reason = format!(
+                    "murmur: {} is currently claimed by agent '{}'. Work on something else, \
+                     or coordinate with them: murmur send {} \"...\" --as {}",
+                    claim.path, claim.holder, claim.holder, name
+                );
+                let mut output = json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason
+                    }
+                });
+                if let Some(ctx) = &context {
+                    output["hookSpecificOutput"]["additionalContext"] = json!(ctx);
                 }
+                emit(output);
+                return;
             }
         }
     }
 
-    // 3. Output hook JSON if we have context to inject
-    if !additional_context.is_empty() {
-        let output = serde_json::json!({
+    if let Some(ctx) = context {
+        emit(json!({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "additionalContext": additional_context.join("\n")
+                "additionalContext": ctx
             }
-        });
-        println!("{}", serde_json::to_string(&output)?);
+        }));
     }
-
-    Ok(())
 }
 
-async fn handle_post_tool_use(
-    channel: &str,
-    agent_id: &str,
-    hook: &HookInput,
-) -> anyhow::Result<()> {
+fn post_tool_use(store: &Store, name: &str, hook: &HookInput) {
     let tool = hook.tool_name.as_deref().unwrap_or("");
-    let file_path = extract_file_path(&hook.tool_input);
-
-    // Notify about the event
-    let notify = OrchestratorRequest::Notify {
-        agent_id: agent_id.into(),
-        event: format!("PostToolUse:{}", tool),
-        path: file_path.clone(),
-    };
-    let _ = protocol::orchestrator_request(channel, &notify).await;
-
-    // Unlock if file was involved
-    if matches!(tool, "Edit" | "Write") {
-        if let Some(path) = file_path {
-            let unlock = OrchestratorRequest::Unlock {
-                agent_id: agent_id.into(),
-                path,
-            };
-            let _ = protocol::orchestrator_request(channel, &unlock).await;
+    if matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+        if let Some(path) = extract_file_path(&hook.tool_input) {
+            let _ = store.release(&path, name);
         }
     }
-
-    Ok(())
 }
 
-async fn handle_stop(channel: &str, agent_id: &str) -> anyhow::Result<()> {
-    let idle = OrchestratorRequest::Idle {
-        agent_id: agent_id.into(),
-    };
-    let _ = protocol::orchestrator_request(channel, &idle).await;
-    Ok(())
+/// Don't let the agent end its turn with unread mail — deliver it as the
+/// block reason so the agent can act on it.
+fn stop(store: &Store, name: &str) {
+    let messages = store.drain(name, false).unwrap_or_default();
+    if let Some(text) = format_messages(&messages) {
+        emit(json!({
+            "decision": "block",
+            "reason": format!(
+                "You received messages from other agents while working:\n{}\nAddress them (reply with `murmur send`) or continue if no action is needed.",
+                text
+            )
+        }));
+    }
+}
+
+fn format_messages(messages: &[Msg]) -> Option<String> {
+    if messages.is_empty() {
+        return None;
+    }
+    Some(
+        messages
+            .iter()
+            .map(|m| format!("[murmur from {}] {}", m.from, m.body))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn extract_file_path(tool_input: &Option<Value>) -> Option<String> {
     let obj = tool_input.as_ref()?.as_object()?;
-    for key in &["file_path", "filePath", "path", "file"] {
-        if let Some(Value::String(s)) = obj.get(*key) {
+    for key in ["file_path", "filePath", "notebook_path", "path", "file"] {
+        if let Some(Value::String(s)) = obj.get(key) {
             return Some(s.clone());
         }
     }
     None
+}
+
+fn emit(value: Value) {
+    println!("{}", value);
 }
