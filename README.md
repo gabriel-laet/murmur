@@ -44,12 +44,13 @@ murmur setup --all    # or wire all supported harnesses regardless
 | Gemini CLI      | MCP in `.gemini/settings.json`                         |
 | Grok CLI        | MCP in `.grok/settings.json`                           |
 | OpenCode        | MCP in `opencode.json`                                 |
+| Herdr           | plugin: idle-wake + pane names become murmur names     |
 | everything else | the coordination contract in `AGENTS.md`               |
 
 Existing config is merged, never clobbered. Agents launched through a wired
-harness get harness-derived names (`claude-a1b2c3`, `codex-4410`, ...), so
-`murmur who` shows the whole mixed fleet at a glance; set `MURMUR_AGENT` to
-pick names yourself.
+harness get harness-derived names (`claude-a1b2c3`, `codex-4410`, ...);
+inside Herdr the pane's agent name is used instead. `murmur who` shows the
+whole mixed fleet at a glance; set `MURMUR_AGENT` to pick names yourself.
 
 ## Quick start
 
@@ -98,12 +99,26 @@ Point N agents at the same board and they self-organize: each takes a task,
 works, completes, takes the next. The hook tells idle agents when the board
 has open work.
 
-### Linear adapter
+### Start a herd
 
-Humans plan in Linear; agents execute on the board; status flows back:
+One command pulls a Linear issue onto the board and, if [Herdr](https://herdr.dev) is running, stands up a named herd against it. Murmur does not become an orchestrator — it sets the room, stamps names, and hands the brief to the agents. They plan and coordinate over the board and inboxes after that.
 
 ```bash
-export LINEAR_API_KEY=lin_api_...
+murmur start ENG-42 --kind grok          # issue → board → lead + worker in Herdr
+murmur start "rewrite claim TTLs" --linear ENG-42 --workers 3 --kind claude
+murmur start "just the board" --no-herdr # skip panes; print how to join
+```
+
+Inside Herdr, `MURMUR_AGENT` is the pane's agent name (`lead`, `w1`, …), so `murmur send lead "…"` and `herdr agent prompt lead` address the same being. After `murmur setup`, idle panes get a nudge when mail is waiting.
+
+### Linear adapter
+
+Humans plan in Linear; agents execute on the board; status flows back.
+If Linear MCP is already authenticated in Grok (`~/.grok`, `/mcps`), murmur
+reads that session — no API key. `LINEAR_API_KEY` is only a fallback.
+
+```bash
+murmur start ENG-42 --kind grok          # get_issue via Linear MCP
 murmur task sync linear --team ENG --label agents
 ```
 
@@ -332,6 +347,7 @@ murmur release <path>      # release a claim
 murmur claims              # list active claims
 murmur task add|list|take|done|drop   # shared work queue
 murmur task sync linear --team ENG    # reconcile the board with Linear
+murmur start [goal|ENG-42]            # Linear issue → board → Herdr herd
 murmur secret exec NAME=<ref> -- cmd  # resolve secret refs into a command's env
 murmur secret resolve <ref>           # resolve to stdout (prefer exec)
 murmur log [-n N]          # recent message history

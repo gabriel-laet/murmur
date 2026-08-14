@@ -9,10 +9,9 @@ use std::io::{BufRead, Write};
 use crate::store::{self, ClaimResult, Store};
 
 pub fn run() -> Result<()> {
-    // MURMUR_AGENT wins; otherwise the harness that launched us (stamped
-    // into its config by `murmur setup`) names the agent, so `murmur who`
-    // shows a heterogeneous fleet: claude-812, codex-4410, gemini-77...
-    let name = std::env::var("MURMUR_AGENT").unwrap_or_else(|_| {
+    // MURMUR_AGENT wins; then the Herdr pane name; otherwise the harness
+    // that launched us (stamped into its config by `murmur setup`).
+    let name = crate::commands::ambient(None).unwrap_or_else(|| {
         let harness = std::env::var("MURMUR_HARNESS")
             .ok()
             .map(|h| h.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>())

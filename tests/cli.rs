@@ -27,6 +27,9 @@ fn murmur(store: &PathBuf, args: &[&str]) -> Output {
         .args(args)
         .env("MURMUR_DIR", store)
         .env_remove("MURMUR_AGENT")
+        .env_remove("HERDR_ENV")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("MURMUR_HERDR")
         .output()
         .unwrap()
 }
@@ -572,4 +575,306 @@ fn setup_all_wires_every_harness() {
     let agents = std::fs::read_to_string(workdir.join("AGENTS.md")).unwrap();
     assert!(agents.starts_with("# My project"), "existing AGENTS.md kept");
     assert_eq!(agents.matches("murmur:begin").count(), 1);
+
+    let plugin = std::fs::read_to_string(home.join(".config/murmur/herdr-plugin/herdr-plugin.toml")).unwrap();
+    assert!(plugin.contains("id = \"murmur.herdr\""), "{}", plugin);
+    assert!(plugin.contains("pane.agent_status_changed"), "{}", plugin);
+    assert!(plugin.contains("\"herdr\""), "plugin invokes murmur herdr: {}", plugin);
+}
+
+fn fake_herdr(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-herdr.sh");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn identity_uses_herdr_agent_name_inside_herdr() {
+    let store = fresh_dir("herdr-id");
+    let base = store.parent().unwrap();
+    let stub = fake_herdr(
+        base,
+        r#"#!/bin/sh
+case "$1 $2" in
+  "agent get")
+    echo '{"result":{"agent":{"name":"backend","pane_id":"w1:p2","cwd":"."}}}' ;;
+  *) echo '{"result":{}}' ;;
+esac
+"#,
+    );
+    let out = Command::new(bin())
+        .args(["join"])
+        .env("MURMUR_DIR", &store)
+        .env_remove("MURMUR_AGENT")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w1:p2")
+        .env("MURMUR_HERDR", &stub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("joined as 'backend'"), "{}", stdout(&out));
+}
+
+#[test]
+fn identity_prefers_murmur_agent_over_herdr() {
+    let store = fresh_dir("herdr-id-override");
+    let base = store.parent().unwrap();
+    let stub = fake_herdr(
+        base,
+        r#"#!/bin/sh
+echo '{"result":{"agent":{"name":"backend","pane_id":"w1:p2"}}}'
+"#,
+    );
+    let out = Command::new(bin())
+        .args(["join"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_AGENT", "frontend")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w1:p2")
+        .env("MURMUR_HERDR", &stub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("joined as 'frontend'"), "{}", stdout(&out));
+}
+
+#[test]
+fn start_no_herdr_puts_goal_on_the_board() {
+    let store = fresh_dir("start-board");
+    let out = Command::new(bin())
+        .args(["start", "rewrite claim TTLs", "--no-herdr"])
+        .env("MURMUR_DIR", &store)
+        .env_remove("MURMUR_AGENT")
+        .env_remove("HERDR_ENV")
+        .env_remove("MURMUR_HERDR")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("rewrite claim TTLs"), "{}", stdout(&out));
+    let list = murmur(&store, &["task", "list"]);
+    assert!(stdout(&list).contains("rewrite claim TTLs"));
+}
+
+#[test]
+fn start_pulls_a_linear_issue_without_herdr() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = fresh_dir("start-linear");
+    let base = store.parent().unwrap();
+    let stub = base.join("linear-stub.sh");
+    std::fs::write(
+        &stub,
+        r#"#!/bin/sh
+echo '{"data":{"issue":{"id":"uuid-42","identifier":"ENG-42","title":"Fix login flow","description":"Users bounce.","url":"https://linear.app/acme/issue/ENG-42"}}}'
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(bin())
+        .args(["start", "ENG-42", "--no-herdr"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_LINEAR_CURL", &stub)
+        .env("LINEAR_API_KEY", "test-key")
+        .env_remove("HERDR_ENV")
+        .env_remove("MURMUR_HERDR")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("linear-ENG-42"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("Fix login flow"), "{}", stdout(&out));
+    let list = murmur(&store, &["task", "list"]);
+    assert!(stdout(&list).contains("linear-ENG-42"));
+}
+
+#[test]
+fn start_reads_issue_from_linear_mcp() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = fresh_dir("start-mcp");
+    let base = store.parent().unwrap();
+    let stub = base.join("linear-mcp.sh");
+    std::fs::write(
+        &stub,
+        r#"#!/bin/sh
+body=$(cat)
+case "$body" in
+  *get_issue*)
+    echo '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"id\":\"ENG-42\",\"title\":\"Fix login flow\",\"description\":\"Users bounce.\",\"url\":\"https://linear.app/acme/issue/ENG-42\"}"}]}}' ;;
+  *)
+    echo '{"jsonrpc":"2.0","id":1,"error":{"message":"unexpected"}}' ;;
+esac
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = Command::new(bin())
+        .args(["start", "ENG-42", "--no-herdr"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_LINEAR_MCP", &stub)
+        .env_remove("MURMUR_LINEAR_CURL")
+        .env_remove("LINEAR_API_KEY")
+        .env_remove("HERDR_ENV")
+        .env_remove("MURMUR_HERDR")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("linear-ENG-42"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("Fix login flow"), "{}", stdout(&out));
+}
+
+#[test]
+fn linear_sync_via_mcp_pulls_and_pushes() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = fresh_dir("linear-mcp-sync");
+    let base = store.parent().unwrap();
+    let log = base.join("mcp-calls.log");
+    let stub = base.join("linear-mcp.sh");
+    std::fs::write(
+        &stub,
+        format!(
+            r#"#!/bin/sh
+body=$(cat)
+printf '%s\n' "$body" >> "{log}"
+case "$body" in
+  *list_issues*)
+    echo '{{"jsonrpc":"2.0","id":1,"result":{{"content":[{{"type":"text","text":"{{\"issues\":[{{\"id\":\"ENG-42\",\"title\":\"Fix login flow\",\"description\":\"Users bounce.\",\"url\":\"https://linear.app/acme/issue/ENG-42\"}}]}}"}}]}}}}' ;;
+  *save_issue*|*save_comment*)
+    echo '{{"jsonrpc":"2.0","id":1,"result":{{"content":[{{"type":"text","text":"{{\\"ok\\":true}}"}}]}}}}' ;;
+  *)
+    echo '{{"jsonrpc":"2.0","id":1,"error":{{"message":"unexpected"}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let sync = || {
+        Command::new(bin())
+            .args(["task", "sync", "linear", "--team", "ENG"])
+            .env("MURMUR_DIR", &store)
+            .env("MURMUR_LINEAR_MCP", &stub)
+            .env_remove("MURMUR_LINEAR_CURL")
+            .env_remove("LINEAR_API_KEY")
+            .output()
+            .unwrap()
+    };
+    let out = sync();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("mcp"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("pulled 1"), "{}", stdout(&out));
+    murmur(&store, &["task", "take", "--as", "worker-1"]);
+    let out = sync();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("save_issue"), "{calls}");
+    assert!(calls.contains("save_comment"), "{calls}");
+    assert!(calls.contains("started") || calls.contains("worker-1"), "{calls}");
+}
+
+#[test]
+fn start_orchestrates_a_herdr_herd() {
+    let store = fresh_dir("start-herd");
+    let base = store.parent().unwrap();
+    let log = base.join("herdr-calls.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "status --json") echo '{{"server":{{"running":true}}}}' ;;
+  "agent list") echo '{{"result":{{"agents":[]}}}}' ;;
+  "workspace create") echo '{{"result":{{"root_pane":{{"pane_id":"w1:p0"}}}}}}' ;;
+  "pane split")
+    n=$(grep -c "pane split" "{log}" || true)
+    echo "{{\"result\":{{\"pane\":{{\"pane_id\":\"w1:p$n\"}}}}}}" ;;
+  "agent start") echo '{{"result":{{"agent":{{"name":"lead","pane_id":"w1:p1"}}}}}}' ;;
+  "agent prompt") echo '{{"result":{{"agent":{{}}}}}}' ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    use std::os::unix::fs::PermissionsExt;
+    let curl = base.join("linear-stub.sh");
+    std::fs::write(
+        &curl,
+        r#"#!/bin/sh
+echo '{"data":{"issue":{"id":"uuid-42","identifier":"ENG-42","title":"Fix login","description":"body","url":"https://linear.app/x/issue/ENG-42"}}}'
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let out = Command::new(bin())
+        .args(["start", "ENG-42", "--kind", "grok", "--workers", "2"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .env("MURMUR_LINEAR_CURL", &curl)
+        .env("LINEAR_API_KEY", "test-key")
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("workspace create"), "{calls}");
+    assert!(calls.contains("pane split"), "{calls}");
+    assert!(calls.contains("agent start"), "{calls}");
+    assert!(calls.contains("agent prompt"), "{calls}");
+    assert!(calls.contains("MURMUR_AGENT=lead") || calls.contains("lead"), "{calls}");
+    assert!(stdout(&out).contains("herd"), "{}", stdout(&out));
+}
+
+#[test]
+fn herdr_idle_wake_prompts_once_per_message() {
+    let store = fresh_dir("wake");
+    murmur(&store, &["send", "lead", "please review", "--as", "alice"]);
+    let base = store.parent().unwrap();
+    let log = base.join("wake-herdr.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "agent get") echo '{{"result":{{"agent":{{"name":"lead","pane_id":"w1:p1","cwd":"."}}}}}}' ;;
+  "agent prompt") echo '{{"result":{{}}}}' ;;
+  "notification show") echo '{{"result":{{}}}}' ;;
+  "pane report-metadata") echo '{{"result":{{}}}}' ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    let event = r#"{"event":"pane.agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w1:p1","workspace_id":"w1","agent_status":"idle"}}"#;
+    let run = || {
+        Command::new(bin())
+            .args(["herdr"])
+            .env("MURMUR_DIR", &store)
+            .env("MURMUR_HERDR", &stub)
+            .env("HERDR_ENV", "1")
+            .env("HERDR_PANE_ID", "w1:p1")
+            .env("HERDR_PLUGIN_EVENT_JSON", event)
+            .env("HERDR_PLUGIN_STATE_DIR", base.join("wake-state"))
+            .output()
+            .unwrap()
+    };
+    let out = run();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("agent prompt"), "{calls}");
+    assert!(calls.contains("please review") || calls.contains("unread"), "{calls}");
+    let before = calls.matches("agent prompt").count();
+    let out = run();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls.matches("agent prompt").count(),
+        before,
+        "must not re-prompt the same mail: {calls}"
+    );
 }

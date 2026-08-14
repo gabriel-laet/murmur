@@ -55,9 +55,10 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `MURMUR_AGENT` if set, else a stable name derived from the session id.
+/// `MURMUR_AGENT` if set, else the Herdr pane name, else a stable name
+/// derived from the session id.
 fn agent_name(hook: &HookInput) -> Option<String> {
-    if let Ok(name) = std::env::var("MURMUR_AGENT") {
+    if let Some(name) = crate::commands::ambient(None) {
         return Some(name);
     }
     let session = hook.session_id.as_deref()?;

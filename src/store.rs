@@ -106,15 +106,20 @@ impl Store {
             return Ok(Store { root: PathBuf::from(dir) });
         }
         let cwd = std::env::current_dir().context("cannot determine cwd")?;
-        let mut dir = cwd.as_path();
+        Ok(Store::locate_in(&cwd))
+    }
+
+    /// Nearest `.murmur` walking up from `start`, else `start/.murmur`.
+    pub fn locate_in(start: &Path) -> Store {
+        let mut dir = start;
         loop {
             let candidate = dir.join(".murmur");
             if candidate.is_dir() {
-                return Ok(Store { root: candidate });
+                return Store { root: candidate };
             }
             match dir.parent() {
                 Some(parent) => dir = parent,
-                None => return Ok(Store { root: cwd.join(".murmur") }),
+                None => return Store { root: start.join(".murmur") },
             }
         }
     }

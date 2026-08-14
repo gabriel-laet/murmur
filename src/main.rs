@@ -1,9 +1,11 @@
 mod commands;
+mod herdr;
 mod hook;
 mod linear;
 mod mcp;
 mod secrets;
 mod setup;
+mod start;
 mod store;
 mod sync;
 mod tasks;
@@ -19,10 +21,11 @@ use clap::{Parser, Subcommand};
     after_help = "\
 Everything lives in .murmur/ (found like .git, walking up from cwd; override with MURMUR_DIR).
 Messages wait in the recipient's inbox until read — nobody needs to be listening.
-Identity comes from --as <name> or the MURMUR_AGENT env var.
+Identity comes from --as <name>, $MURMUR_AGENT, or the Herdr pane name.
 
 QUICK START:
-    murmur setup                           # wire every installed harness (Claude, Codex, Gemini, ...) in one command
+    murmur setup                           # wire every installed harness + Herdr plugin
+    murmur start ENG-42 --kind grok        # Linear issue → board → Herdr herd
     murmur send frontend \"API is ready\"    # message a peer (delivered even if they're busy)
     murmur send '*' \"rebasing main\"        # broadcast to everyone
     murmur send db \"schema ok?\" --reply    # ask and block for the answer
@@ -151,16 +154,35 @@ enum Command {
         #[command(subcommand)]
         cmd: SecretCmd,
     },
-    /// Wire this repo for cross-tool agent coordination: Claude Code hooks + MCP for every installed harness (Codex, Gemini, Grok, OpenCode) + the AGENTS.md contract
+    /// Wire this repo for cross-tool agent coordination: Claude Code hooks + MCP for every installed harness (Codex, Gemini, Grok, OpenCode) + Herdr plugin + the AGENTS.md contract
     Setup {
         /// Wire every supported harness, even ones not detected on this machine
         #[arg(long)]
         all: bool,
     },
+    /// Stand up a herd for a piece of work: Linear issue → board → Herdr panes
+    Start {
+        /// What to work on. A Linear id like ENG-42 is enough on its own.
+        goal: Option<String>,
+        /// Linear issue id (ENG-42). Implied when GOAL looks like one.
+        #[arg(long)]
+        linear: Option<String>,
+        /// How many agents to start (lead + workers). Default 2.
+        #[arg(long, default_value_t = 2)]
+        workers: usize,
+        /// Herdr agent kind: grok, claude, codex, …
+        #[arg(long)]
+        kind: Option<String>,
+        /// Set up the board only; don't spawn Herdr panes
+        #[arg(long)]
+        no_herdr: bool,
+    },
     /// MCP server over stdio (messaging, claims, and task tools)
     Mcp,
     /// Claude Code hook adapter (reads hook JSON on stdin)
     Hook,
+    /// Herdr plugin adapter (idle-wake). Called by the plugin, not by hand.
+    Herdr,
 }
 
 #[derive(Subcommand)]
@@ -276,7 +298,11 @@ fn run() -> anyhow::Result<()> {
             SecretCmd::Exec { pairs, command } => commands::secret_exec(pairs, command),
         },
         Command::Setup { all } => setup::run(all),
+        Command::Start { goal, linear, workers, kind, no_herdr } => {
+            start::run(start::Opts { goal, linear, workers, kind, no_herdr })
+        }
         Command::Mcp => mcp::run(),
         Command::Hook => hook::run(),
+        Command::Herdr => herdr::run(),
     }
 }

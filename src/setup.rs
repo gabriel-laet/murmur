@@ -45,6 +45,12 @@ pub fn run(all: bool) -> Result<()> {
         }
     }
 
+    if all || on_path("herdr") || home_has(".config/herdr") {
+        record("~/.config/murmur/herdr-plugin (Herdr idle-wake)", install_herdr()?);
+    } else {
+        skipped.push("herdr");
+    }
+
     for t in &wired {
         println!("wired  {}", t);
     }
@@ -58,7 +64,8 @@ pub fn run(all: bool) -> Result<()> {
         );
     }
     println!("\nEvery agent session in this repo now shares one .murmur/ — inboxes, task board, claims.");
-    println!("Set MURMUR_AGENT=<name> per session to pick agent names; otherwise they are harness-derived.");
+    println!("Set MURMUR_AGENT=<name> per session to pick agent names; inside Herdr the pane name is used.");
+    println!("Start a herd with: murmur start ENG-42 --kind grok");
     println!("Watch the cross-tool traffic with: murmur watch");
     Ok(())
 }
@@ -237,6 +244,73 @@ fn install_codex() -> Result<bool> {
     Ok(true)
 }
 
+/// Write the Herdr plugin (idle-wake) into ~/.config/murmur/herdr-plugin
+/// and link it. Files are rewritten when the murmur path changes so
+/// upgrades stay pointed at the current binary.
+fn install_herdr() -> Result<bool> {
+    let home = home().context("HOME is not set — cannot install the Herdr plugin")?;
+    let dir = home.join(".config/murmur/herdr-plugin");
+    fs::create_dir_all(&dir)?;
+    let murmur = murmur_exe()?;
+    let toml = herdr_plugin_toml(&murmur);
+    let path = dir.join("herdr-plugin.toml");
+    let previous = fs::read_to_string(&path).unwrap_or_default();
+    let mut changed = false;
+    if previous != toml {
+        fs::write(&path, toml)?;
+        changed = true;
+    }
+    match link_herdr_plugin(&dir) {
+        Ok(linked) => Ok(changed || linked),
+        Err(e) => {
+            eprintln!(
+                "murmur: wrote {} — link it with: herdr plugin link {}",
+                path.display(),
+                dir.display()
+            );
+            eprintln!("        ({e})");
+            Ok(changed)
+        }
+    }
+}
+
+fn herdr_plugin_toml(murmur: &Path) -> String {
+    format!(
+        "id = \"murmur.herdr\"\n\
+         name = \"murmur\"\n\
+         version = \"0.1.0\"\n\
+         min_herdr_version = \"0.7.0\"\n\
+         description = \"Wake idle Herdr agents when murmur mail is waiting\"\n\
+         platforms = [\"linux\", \"macos\"]\n\
+         \n\
+         [[events]]\n\
+         on = \"pane.agent_status_changed\"\n\
+         command = [{}, \"herdr\"]\n",
+        toml_string(&murmur.display().to_string())
+    )
+}
+
+fn toml_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn murmur_exe() -> Result<PathBuf> {
+    std::env::current_exe().context("cannot locate the murmur binary")
+}
+
+fn link_herdr_plugin(dir: &Path) -> Result<bool> {
+    if !on_path("herdr") && std::env::var_os("MURMUR_HERDR").is_none() {
+        anyhow::bail!("herdr is not on PATH");
+    }
+    let listed = crate::herdr::call(&["plugin", "list"]).unwrap_or(serde_json::json!({}));
+    let blob = listed.to_string();
+    if blob.contains("murmur.herdr") {
+        return Ok(false);
+    }
+    crate::herdr::call(&["plugin", "link", &dir.display().to_string()])?;
+    Ok(true)
+}
+
 /// The contract any agent can follow with zero integration — Codex, Amp,
 /// Jules, Cursor, and most CLIs read AGENTS.md. Marker comments make the
 /// section replaceable and the write idempotent.
@@ -263,8 +337,11 @@ fn agents_md_section() -> String {
         "{}\n## Agent coordination (murmur)\n\n\
         This repo coordinates AI agents through a shared `.murmur/` directory. Other\n\
         agents (possibly from other tools) may be working here right now. The rules:\n\n\
-        - **Identity.** Use `$MURMUR_AGENT` as your name if set; otherwise pick a short\n\
-        stable one (e.g. `codex-1`) and use it consistently via `--as <name>`.\n\
+        - **Identity.** Use `$MURMUR_AGENT` as your name if set; inside Herdr the pane's\n\
+        agent name is used automatically. Otherwise pick a short stable one\n\
+        (e.g. `codex-1`) and use it consistently via `--as <name>`.\n\
+        - **Kick off work.** `murmur start ENG-42 --kind grok` pulls the Linear issue\n\
+        onto the board and, if Herdr is running, starts a named herd against it.\n\
         - **Announce yourself** once per session: `murmur join <name>`.\n\
         - **Check your mail** between tasks and before finishing:\n\
         `murmur inbox --as <name>`. Reply to questions with the command shown.\n\

@@ -5,13 +5,26 @@ use std::time::{Duration, Instant};
 
 use crate::store::{self, ClaimResult, Msg, Store};
 
-/// Identity comes from `--as`, then `MURMUR_AGENT`. Explicit beats ambient.
+/// Identity: `--as`, then `MURMUR_AGENT`, then the Herdr pane name when
+/// `HERDR_ENV=1`. Explicit beats ambient.
 pub fn identity(explicit: Option<String>) -> Result<String> {
-    let name = explicit
-        .or_else(|| std::env::var("MURMUR_AGENT").ok())
+    let name = ambient(explicit)
         .context("who are you? pass --as <name> or export MURMUR_AGENT=<name>")?;
     store::valid_name(&name)?;
     Ok(name)
+}
+
+/// Best-effort name with no error — used by the hook and MCP adapters.
+pub fn ambient(explicit: Option<String>) -> Option<String> {
+    if let Some(name) = explicit.filter(|s| !s.is_empty()) {
+        return Some(name);
+    }
+    if let Ok(name) = std::env::var("MURMUR_AGENT") {
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    crate::herdr::agent_name()
 }
 
 pub fn send(

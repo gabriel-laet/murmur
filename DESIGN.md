@@ -71,6 +71,15 @@ consume `murmur watch --json` (stable, newline-delimited) rather than scrape
 terminals. Being the state layer under other people's dashboards is the
 position; competing on panes is not.
 
+`murmur start` is userland policy in the same slot as `task sync linear`:
+it pulls an issue onto the board and, if herdr is running, asks herdr to
+open panes and prompt a named herd. It does not live in the kernel, does
+not supervise those processes, and does not replace herdr's `agent prompt`
+with a mailbox. After the brief is delivered, coordination is murmur
+again — tasks, inboxes, claims. Identity is the seam: inside a herdr pane,
+the pane's agent name *is* the murmur name; a herdr plugin (`murmur herdr`)
+nudges idle panes when mail is waiting.
+
 ## Security by delegation
 
 A kernel does not invent trust; it enforces boundaries that already exist.
@@ -152,10 +161,11 @@ repeat and re-pulls never duplicate.
 
 The split: the tracker owns planning, priorities, the human UI, and history.
 The board owns the agent mechanics — atomic take, holder-checked completion —
-because those need filesystem atomicity, not an HTTP round-trip. Transport is
-`curl` against the tracker's API (the same "use the ubiquitous tool" move as
-the filesystem and ssh); credentials come from the environment and are never
-stored. Other trackers (GitHub Issues, Jira) are the same adapter shape.
+because those need filesystem atomicity, not an HTTP round-trip. Transport prefers the Linear MCP session the user already has (Grok's
+OAuth at `https://mcp.linear.app/mcp`); `LINEAR_API_KEY` is a fallback.
+The same "use the ubiquitous tool" move as the filesystem and ssh —
+murmur never stores a Linear credential. Other trackers (GitHub Issues,
+Jira) are the same adapter shape.
 
 ## Remote: replication, not networking (roadmap)
 
