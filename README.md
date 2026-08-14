@@ -1,11 +1,21 @@
 # murmur
 
-The communication kernel for AI agents. A directory of files, not a daemon.
+The communication kernel for AI agents — any agent, any harness, one repo.
+A directory of files, not a daemon.
+
+Your Claude Code session, your Codex session, and your Gemini session are all
+working in the same repo and can't talk to each other. Vendor messaging fixes
+this for one vendor; terminal multiplexers fix it for one screen. Murmur fixes
+it at the only layer every agent already shares: the filesystem. One
+`.murmur/` directory gives a heterogeneous fleet durable inboxes, presence, a
+shared task board with atomic work-stealing, advisory file claims, and secret
+references — and `murmur setup` wires every harness installed on your machine
+in one command.
 
 Murmur doesn't orchestrate agents and doesn't secure networks — it gives agents
-mechanism (messaging, presence, claims, a task board, secret references) built
-on the trust you already have: your filesystem, your ssh keys, your private
-network, your secret manager. Design and remote/p2p roadmap: [DESIGN.md](DESIGN.md).
+mechanism, built on the trust you already have: your filesystem, your ssh keys,
+your private network, your secret manager. Design and remote/p2p roadmap:
+[DESIGN.md](DESIGN.md).
 
 Agents are intermittent — they exist for a few seconds between tool calls, then
 they're gone until the next turn. Sockets, brokers, and HTTP all assume someone
@@ -21,8 +31,25 @@ No daemon. No sockets. No ports. No auth. Nothing to keep alive.
 
 ```bash
 cargo install --path .
-murmur setup    # wires hooks + MCP into the current repo, idempotently
+murmur setup          # wire every harness found on this machine, idempotently
+murmur setup --all    # or wire all supported harnesses regardless
 ```
+
+`setup` detects what's installed and writes each tool's own config format:
+
+| Harness         | What setup writes                                      |
+| --------------- | ------------------------------------------------------ |
+| Claude Code     | hooks in `.claude/settings.json` + MCP in `.mcp.json`  |
+| Codex CLI       | MCP in `~/.codex/config.toml`                          |
+| Gemini CLI      | MCP in `.gemini/settings.json`                         |
+| Grok CLI        | MCP in `.grok/settings.json`                           |
+| OpenCode        | MCP in `opencode.json`                                 |
+| everything else | the coordination contract in `AGENTS.md`               |
+
+Existing config is merged, never clobbered. Agents launched through a wired
+harness get harness-derived names (`claude-a1b2c3`, `codex-4410`, ...), so
+`murmur who` shows the whole mixed fleet at a glance; set `MURMUR_AGENT` to
+pick names yourself.
 
 ## Quick start
 
@@ -165,12 +192,27 @@ in an agent's context is labeled "never resolve this into your context."
 A `secret://env/<VAR>` backend covers the trivial local case; more backends
 are one match arm each. See [DESIGN.md](DESIGN.md) for the invariants.
 
-## Claude Code integration
+## Harness integrations
 
 `murmur setup` writes all of the below for you (merging with existing config,
-never clobbering). The details, if you want them by hand:
+never clobbering). There are three tiers, and every tier speaks the same
+directory — a Claude session with hooks, a Codex session over MCP, and a
+shell script reading raw files are all the same kind of peer:
 
-### Hooks (zero-config coordination)
+1. **Hooks** (Claude Code today) — fully passive coordination: mail is
+   injected into context, claims are enforced around edits, no cooperation
+   from the agent required.
+2. **MCP** (Claude Code, Codex, Gemini CLI, Grok CLI, OpenCode) — the agent
+   gets `send_message`, `ask`, `take_task`, etc. as tools and coordinates
+   proactively.
+3. **AGENTS.md** (everything else) — a written contract: check your inbox
+   between tasks, take work from the board, don't edit claimed files, never
+   resolve `secret://` refs. Any agent that reads AGENTS.md participates
+   with zero integration.
+
+The details, if you want them by hand:
+
+### Claude Code hooks (zero-config coordination)
 
 Add to `.claude/settings.json`:
 
@@ -202,9 +244,13 @@ Then every Claude Code session in the workspace coordinates automatically:
 Set `MURMUR_AGENT=frontend` in the session's environment to pick your own
 name; otherwise one is derived from the session id.
 
-### MCP (proactive messaging)
+### MCP (proactive messaging, every harness)
 
-For agents that should *send* messages, not just receive them:
+For agents that should *send* messages, not just receive them. The same
+stdio server drops into any MCP-speaking harness — this is the `.mcp.json`
+shape; Codex (`~/.codex/config.toml`), Gemini (`.gemini/settings.json`),
+Grok (`.grok/settings.json`), and OpenCode (`opencode.json`) get their own
+formats from `setup`:
 
 ```json
 {
@@ -212,15 +258,27 @@ For agents that should *send* messages, not just receive them:
     "murmur": {
       "command": "murmur",
       "args": ["mcp"],
-      "env": { "MURMUR_AGENT": "backend" }
+      "env": { "MURMUR_HARNESS": "claude", "MURMUR_AGENT": "backend" }
     }
   }
 }
 ```
 
-Exposes `send_message`, `broadcast`, `ask` (blocking request/reply),
-`check_inbox`, `list_agents`, `claim_file`, `release_file`, `add_task`,
-`take_task`, `complete_task`, and `list_tasks`.
+`MURMUR_AGENT` fixes the agent's name; without it, `MURMUR_HARNESS` (stamped
+by setup) derives one per session, e.g. `codex-4410`. Exposes `send_message`,
+`broadcast`, `ask` (blocking request/reply), `check_inbox`, `list_agents`,
+`claim_file`, `release_file`, `add_task`, `take_task`, `complete_task`, and
+`list_tasks`.
+
+### AGENTS.md (the universal contract)
+
+`setup` appends a marked section to `AGENTS.md` telling any agent that reads
+it — Codex, Amp, Jules, Cursor, whatever ships next — how to coordinate here:
+announce with `murmur join`, check `murmur inbox` between tasks, take work
+with `murmur task take`, respect claims, never resolve `secret://` refs into
+context. It even documents the raw file protocol for agents without murmur
+installed. The section lives between `<!-- murmur:begin -->` and
+`<!-- murmur:end -->` markers, so re-runs never duplicate it.
 
 ### No integration at all
 
@@ -280,7 +338,7 @@ murmur log [-n N]          # recent message history
 murmur watch               # follow all traffic live (--all for history)
 murmur clean               # prune dead agents + expired claims (--all: rm .murmur)
 murmur sync <peer>         # reconcile with another .murmur (path or user@host[:path])
-murmur setup               # wire hooks + MCP into this repo
+murmur setup               # wire every installed harness + AGENTS.md (--all: all supported)
 murmur mcp                 # MCP server over stdio
 murmur hook                # Claude Code hook adapter
 ```

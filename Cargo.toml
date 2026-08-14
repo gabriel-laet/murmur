@@ -2,7 +2,7 @@
 name = "murmur"
 version = "0.6.0"
 edition = "2021"
-description = "Local message passing for AI agents — a directory of files, not a daemon"
+description = "The communication kernel for AI agents — any agent, any harness; a directory of files, not a daemon"
 license = "MIT"
 
 [dependencies]

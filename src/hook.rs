@@ -65,7 +65,7 @@ fn agent_name(hook: &HookInput) -> Option<String> {
     if short.is_empty() {
         None
     } else {
-        Some(format!("agent-{}", short))
+        Some(format!("claude-{}", short))
     }
 }
 

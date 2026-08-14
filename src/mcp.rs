@@ -9,8 +9,17 @@ use std::io::{BufRead, Write};
 use crate::store::{self, ClaimResult, Store};
 
 pub fn run() -> Result<()> {
-    let name = std::env::var("MURMUR_AGENT")
-        .unwrap_or_else(|_| format!("agent-{}", std::process::id()));
+    // MURMUR_AGENT wins; otherwise the harness that launched us (stamped
+    // into its config by `murmur setup`) names the agent, so `murmur who`
+    // shows a heterogeneous fleet: claude-812, codex-4410, gemini-77...
+    let name = std::env::var("MURMUR_AGENT").unwrap_or_else(|_| {
+        let harness = std::env::var("MURMUR_HARNESS")
+            .ok()
+            .map(|h| h.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>())
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| "agent".into());
+        format!("{}-{}", harness, std::process::id())
+    });
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 

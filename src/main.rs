@@ -15,14 +15,14 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "murmur",
     version,
-    about = "Local message passing for AI agents. A directory of files, not a daemon.",
+    about = "The communication kernel for AI agents — any agent, any harness. A directory of files, not a daemon.",
     after_help = "\
 Everything lives in .murmur/ (found like .git, walking up from cwd; override with MURMUR_DIR).
 Messages wait in the recipient's inbox until read — nobody needs to be listening.
 Identity comes from --as <name> or the MURMUR_AGENT env var.
 
 QUICK START:
-    murmur setup                           # wire this repo (hooks + MCP) in one command
+    murmur setup                           # wire every installed harness (Claude, Codex, Gemini, ...) in one command
     murmur send frontend \"API is ready\"    # message a peer (delivered even if they're busy)
     murmur send '*' \"rebasing main\"        # broadcast to everyone
     murmur send db \"schema ok?\" --reply    # ask and block for the answer
@@ -151,8 +151,12 @@ enum Command {
         #[command(subcommand)]
         cmd: SecretCmd,
     },
-    /// Wire this repo for agent coordination (.claude/settings.json hooks + .mcp.json)
-    Setup,
+    /// Wire this repo for cross-tool agent coordination: Claude Code hooks + MCP for every installed harness (Codex, Gemini, Grok, OpenCode) + the AGENTS.md contract
+    Setup {
+        /// Wire every supported harness, even ones not detected on this machine
+        #[arg(long)]
+        all: bool,
+    },
     /// MCP server over stdio (messaging, claims, and task tools)
     Mcp,
     /// Claude Code hook adapter (reads hook JSON on stdin)
@@ -271,7 +275,7 @@ fn run() -> anyhow::Result<()> {
             SecretCmd::Resolve { reference } => commands::secret_resolve(&reference),
             SecretCmd::Exec { pairs, command } => commands::secret_exec(pairs, command),
         },
-        Command::Setup => setup::run(),
+        Command::Setup { all } => setup::run(all),
         Command::Mcp => mcp::run(),
         Command::Hook => hook::run(),
     }

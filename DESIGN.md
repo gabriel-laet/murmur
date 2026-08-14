@@ -35,6 +35,42 @@ installed. The CLI, the MCP server, and the Claude Code hook are thin
 adapters over the same directory — the protocol is something agents already
 speak.
 
+## Cross-harness: the adapter surface is the product
+
+The coordination gap people actually feel in 2026 is not between two
+sessions of one tool — it is between *tools*. Vendor messaging (Claude
+Code's cross-session feature) is polished but constitutionally single-vendor:
+it will never deliver a message from Codex to Grok. Terminal multiplexers
+(herdr, Claude Squad, …) coordinate whatever runs in their panes, but their
+"messaging" is scraped terminal state owned by a live process — kill the
+multiplexer and the coordination is gone, and nothing crosses a machine
+boundary. The filesystem thesis is the answer to exactly this: the one
+transport Claude, Codex, Gemini, Grok, and a shell script genuinely share.
+
+So the kernel stays small and the *adapters* carry the strategy. Three
+integration tiers, all over the same directory:
+
+1. **Hooks** — passive, enforced coordination (inbox injection, claim
+   denial). Claude Code today; any harness that grows a hook surface gets
+   the same adapter.
+2. **MCP** — proactive tools, one stdio server, wired by `murmur setup`
+   into each harness's own config format (`.mcp.json`,
+   `~/.codex/config.toml`, `.gemini/settings.json`, `.grok/settings.json`,
+   `opencode.json`). Setup stamps `MURMUR_HARNESS` into each config so
+   default agent names expose the fleet's heterogeneity (`claude-…`,
+   `codex-…`) in `murmur who`.
+3. **AGENTS.md** — the written contract for everything else, including
+   agents with no murmur binary at all (the raw file protocol is in the
+   contract). This is "the format is the protocol", one level up.
+
+Adding a harness must stay a ~50-line adapter, never a fork of semantics.
+
+Multiplexers are not competitors; they are **views**. Murmur owns durable
+shared state; a control-room TUI that wants to render agent chatter should
+consume `murmur watch --json` (stable, newline-delimited) rather than scrape
+terminals. Being the state layer under other people's dashboards is the
+position; competing on panes is not.
+
 ## Security by delegation
 
 A kernel does not invent trust; it enforces boundaries that already exist.
@@ -160,9 +196,11 @@ Transport phases:
   Per-entry signatures for *transitive* provenance (trusting A's entries
   relayed via B without trusting B) arrive with phase 2's keypairs; over
   direct ssh, the peer is already authenticated by ssh itself.
-- **Phase 2 — `murmur peer`**: a per-machine replicator daemon (QUIC,
-  LAN discovery, ticket invites) for push-latency sync, bound to private
-  interfaces only. The rule that keeps it from becoming v1's orchestrator:
+- **Phase 2 — `murmur peer`** (*deliberately deferred*: harness breadth
+  beats push latency — at agent timescales a per-turn phase-1 sync is live
+  enough, and no competitor pressure exists on this axis): a per-machine
+  replicator daemon (QUIC, LAN discovery, ticket invites) for push-latency
+  sync, bound to private interfaces only. The rule that keeps it from becoming v1's orchestrator:
   **servers own state; peers own copies.** The daemon is a dumb replicator —
   kill it and nothing is lost; the directory is still the truth; phase 1
   still works without it. No component's death may lose data.
