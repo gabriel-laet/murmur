@@ -71,8 +71,8 @@ consume `murmur watch --json` (stable, newline-delimited) rather than scrape
 terminals. Being the state layer under other people's dashboards is the
 position; competing on panes is not.
 
-`murmur start` is userland policy in the same slot as `task sync linear`:
-it pulls an issue onto the board and, if herdr is running, asks herdr to
+`murmur start` is userland policy in the same slot as `task sync beads`:
+it pulls a bead onto the board and, if herdr is running, asks herdr to
 open panes and prompt a named herd. It does not live in the kernel, does
 not supervise those processes, and does not replace herdr's `agent prompt`
 with a mailbox. After the brief is delivered, coordination is murmur
@@ -93,7 +93,7 @@ already owns them is available:
 | Remote, phase 2     | private networks (Tailscale, WireGuard)  | bind private interfaces **only** |
 | Mesh membership     | tailnet ACLs                             | thin node allowlist on top       |
 | Secret values       | the secret manager (Infisical, …)        | transport references, not values |
-| Task planning       | the tracker (Linear, …)                  | sync adapter; board stays kernel |
+| Task planning/memory | beads (`bd`, rides git)                 | sync adapter; board stays kernel |
 
 Two things do belong in the kernel:
 
@@ -149,23 +149,40 @@ Adding a backend is one match arm that shells out to its CLI (`vault`, `op`,
 `aws secretsmanager`, …). Backends must be explicitly known — refs never
 execute arbitrary commands, because message bodies are attacker-controlled.
 
-## Trackers: adapters, not replacements
+## Beads: the board's upstream
 
-The same delegation applies to task planning. `murmur task sync linear`
-reconciles the board with Linear bidirectionally and idempotently: open
-issues pull onto the board as `linear-<identifier>` tasks; local transitions
-push back as workflow-state changes with an attributed comment (take →
-started, done → completed, drop → unstarted). A `synced_state` field in the
-task file records what the tracker has already been told, so pushes never
-repeat and re-pulls never duplicate.
+The same delegation applies to work. Beads (`bd`) is the agent-native
+tracker — local-first, git-distributed, a dependency graph with ready-work
+detection — and it owns planning, priorities, dependencies, and long-term
+memory across sessions. The board owns the agent mechanics — atomic take,
+holder-checked completion — because N racing agents need filesystem
+atomicity. `murmur task sync beads` reconciles the two bidirectionally and
+idempotently: only *ready* beads pull onto the board (`bd ready` is
+dependency-aware — the board must never offer an agent blocked work),
+keeping their own ids, and local transitions push back (take → in_progress
+with the agent as assignee, done → closed with attribution, drop → open).
+A `synced_state` field in the task file records what beads has already been
+told, so pushes never repeat and re-pulls never duplicate.
 
-The split: the tracker owns planning, priorities, the human UI, and history.
-The board owns the agent mechanics — atomic take, holder-checked completion —
-because those need filesystem atomicity, not an HTTP round-trip. Transport prefers the Linear MCP session the user already has (Grok's
-OAuth at `https://mcp.linear.app/mcp`); `LINEAR_API_KEY` is a fallback.
-The same "use the ubiquitous tool" move as the filesystem and ssh —
-murmur never stores a Linear credential. Other trackers (GitHub Issues,
-Jira) are the same adapter shape.
+Murmur shells out to the `bd` CLI — the same move as `herdr` and ssh: no
+SDK, no daemon, `.beads/` internals never touched. The content rule that
+makes the seam real: anything a future session needs (decisions, discovered
+work, dependency links) goes to beads; anything only this conversation
+needs flows through murmur and is consumed. The stack is three timescales —
+beads is memory (days–months, rides git), murmur is the nervous system
+(minutes–hours), herdr is attention (seconds) — and each layer talks only
+to its neighbor. Herdr never learns what a bead is; the idle-wake plugin
+closes the loop by pointing an idle pane with an empty inbox at `bd ready`:
+herdr notices free attention, murmur routes it, beads supplies the work.
+
+The trajectory: the local board slims toward a staging area for beads —
+kept because any process that can `mv` a file can take a task, even with no
+`bd` installed. Other trackers (Linear, GitHub Issues, Jira) remain the
+same adapter shape if someone needs one; beads is the default because it
+shares murmur's thesis — state in files, transport you already trust (git),
+no server. It also means a distributed fleet needs no new infrastructure:
+work replicates with `git push/pull`, chatter replicates with
+`murmur sync <host>` over ssh, and herdr stays local to each machine.
 
 ## Remote: replication, not networking (roadmap)
 

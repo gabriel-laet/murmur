@@ -6,7 +6,7 @@
 //! status changes so idle agents get nudged about waiting mail.
 //!
 //! The kernel never talks to Herdr's socket. We shell out to the `herdr`
-//! CLI the same way Linear shells out to `curl`.
+//! CLI the same way beads shells out to `bd`.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -255,14 +255,20 @@ fn run_inner() -> Result<()> {
 
     let msgs = store.drain(&name, true).unwrap_or_default();
     let _ = report_mail(&pane, msgs.len());
-    if msgs.is_empty() {
-        return Ok(());
-    }
 
     let state_dir = std::env::var_os("HERDR_PLUGIN_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| store.root().join("tmp"));
     let _ = std::fs::create_dir_all(&state_dir);
+
+    if msgs.is_empty() {
+        // No mail — but an idle pane with ready beads is attention going to
+        // waste. Nudge once per bead: beads supplies the work, murmur routes
+        // the attention, herdr noticed it was free.
+        nudge_ready_beads(&name, cwd.as_deref(), &state_dir);
+        return Ok(());
+    }
+
     let wake_path = state_dir.join(format!("wake-{name}.json"));
     let already: HashSet<String> = std::fs::read(&wake_path)
         .ok()
@@ -294,6 +300,47 @@ fn run_inner() -> Result<()> {
     }
     let _ = std::fs::write(wake_path, serde_json::to_vec(&next).unwrap_or_default());
     Ok(())
+}
+
+/// Idle pane, empty inbox: point it at beads' ready work, once per bead.
+/// Best-effort like everything else in the plugin — no beads, no nudge.
+fn nudge_ready_beads(name: &str, cwd: Option<&Path>, state_dir: &Path) {
+    let Some(cwd) = cwd else { return };
+    if !crate::beads::available_in(cwd) {
+        return;
+    }
+    let Ok(ready) = crate::beads::ready_in(Some(cwd)) else { return };
+    if ready.is_empty() {
+        return;
+    }
+    let path = state_dir.join(format!("ready-{name}.json"));
+    let seen: HashSet<String> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let fresh: Vec<_> = ready.iter().filter(|i| !seen.contains(&i.id)).collect();
+    if fresh.is_empty() {
+        return;
+    }
+    let listing = fresh
+        .iter()
+        .take(3)
+        .map(|i| format!("{} ({})", i.id, i.title))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let text = format!(
+        "[murmur] no mail, but {} ready bead(s) with no open blockers: {}. \
+         Pull them onto the board with `murmur task sync beads`, then \
+         `murmur task take --as {name}` (or inspect with `bd show <id>`).",
+        fresh.len(),
+        listing
+    );
+    let _ = prompt(name, &text);
+    let mut next = seen;
+    for i in &ready {
+        next.insert(i.id.clone());
+    }
+    let _ = std::fs::write(path, serde_json::to_vec(&next).unwrap_or_default());
 }
 
 fn plugin_event() -> Option<Value> {

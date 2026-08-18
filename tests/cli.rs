@@ -295,26 +295,19 @@ fn inbox_flags_secret_references_without_resolving() {
     assert!(!text.contains("must-not-appear"), "value was never resolved");
 }
 
-#[test]
-fn linear_sync_pulls_pushes_and_stays_idempotent() {
+fn fake_bd(base: &std::path::Path, log: &std::path::Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    let store = fresh_dir("linear");
-    let base = store.parent().unwrap();
-    let log = base.join("linear-calls.log");
-    let stub = base.join("linear-stub.sh");
+    let stub = base.join("bd-stub.sh");
     std::fs::write(
         &stub,
         format!(
             r#"#!/bin/sh
-body=$(cat)
-printf '%s\n' "$body" >> "{log}"
-case "$body" in
-  *'teams(filter'*)
-    echo '{{"data":{{"teams":{{"nodes":[{{"id":"t1","states":{{"nodes":[{{"id":"s-un","name":"Todo","type":"unstarted"}},{{"id":"s-st","name":"In Progress","type":"started"}},{{"id":"s-co","name":"Done","type":"completed"}}]}}}}]}}}}}}' ;;
-  *'issues(filter'*)
-    echo '{{"data":{{"issues":{{"nodes":[{{"id":"uuid-42","identifier":"ENG-42","title":"Fix login flow","description":"Users bounce on refresh.","url":"https://linear.app/acme/issue/ENG-42"}}]}}}}}}' ;;
-  *)
-    echo '{{"data":{{"issueUpdate":{{"success":true}},"commentCreate":{{"success":true}}}}}}' ;;
+printf '%s\n' "$*" >> "{log}"
+case "$1" in
+  ready) echo '[{{"id":"bd-a1b2","title":"Fix login flow","description":"Users bounce on refresh."}}]' ;;
+  show) echo '{{"id":"bd-a1b2","title":"Fix login flow","description":"Users bounce on refresh.","status":"open"}}' ;;
+  create) echo '{{"id":"bd-9f3c","title":"'"$2"'","status":"open"}}' ;;
+  *) echo '{{}}' ;;
 esac
 "#,
             log = log.display()
@@ -322,44 +315,52 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    stub
+}
+
+#[test]
+fn beads_sync_pulls_pushes_and_stays_idempotent() {
+    let store = fresh_dir("beads");
+    let base = store.parent().unwrap();
+    let log = base.join("bd-calls.log");
+    let stub = fake_bd(base, &log);
 
     let sync = || {
         Command::new(bin())
-            .args(["task", "sync", "linear", "--team", "ENG"])
+            .args(["task", "sync", "beads"])
             .env("MURMUR_DIR", &store)
-            .env("MURMUR_LINEAR_CURL", &stub)
-            .env("LINEAR_API_KEY", "test-key")
+            .env("MURMUR_BEADS", &stub)
             .output()
             .unwrap()
     };
 
-    // pull: the issue lands on the board once, with a readable id
+    // pull: the ready bead lands on the board once, keeping its own id
     let out = sync();
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("pulled 1"));
     let out = sync();
     assert!(stdout(&out).contains("pulled 0"), "re-sync must not duplicate");
     let out = murmur(&store, &["task", "list"]);
-    assert!(stdout(&out).contains("linear-ENG-42"));
+    assert!(stdout(&out).contains("bd-a1b2"));
     assert!(stdout(&out).contains("Fix login flow"));
 
-    // take, then sync pushes started + an attributed comment, exactly once
-    let out = murmur(&store, &["task", "take", "--as", "worker-1"]);
-    assert!(stdout(&out).contains("linear.app/acme/issue/ENG-42"), "url surfaces on take");
+    // take, then sync pushes in_progress with the agent as assignee, once
+    murmur(&store, &["task", "take", "--as", "worker-1"]);
     let out = sync();
-    assert!(stdout(&out).contains("pushed 1"));
+    assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
     let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(calls.contains("s-st"), "moved to started in Linear");
-    assert!(calls.contains("worker-1"), "comment attributes the agent");
+    assert!(calls.contains("update bd-a1b2 --status in_progress"), "{calls}");
+    assert!(calls.contains("--assignee worker-1"), "assignee attributes the agent: {calls}");
     let out = sync();
     assert!(stdout(&out).contains("pushed 0"), "push is idempotent");
 
-    // done flows through as completed
-    murmur(&store, &["task", "done", "linear-ENG-42", "--as", "worker-1"]);
+    // done flows through as a close, with attribution
+    murmur(&store, &["task", "done", "bd-a1b2", "--as", "worker-1"]);
     let out = sync();
-    assert!(stdout(&out).contains("pushed 1"));
+    assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
     let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(calls.contains("s-co"), "moved to completed in Linear");
+    assert!(calls.contains("close bd-a1b2"), "closed in beads: {calls}");
+    assert!(calls.contains("worker-1 via murmur"), "{calls}");
 }
 
 fn sync(from: &PathBuf, to: &std::path::Path) -> Output {
@@ -658,119 +659,49 @@ fn start_no_herdr_puts_goal_on_the_board() {
 }
 
 #[test]
-fn start_pulls_a_linear_issue_without_herdr() {
-    use std::os::unix::fs::PermissionsExt;
-    let store = fresh_dir("start-linear");
+fn start_pulls_a_bead_without_herdr() {
+    let store = fresh_dir("start-bead");
     let base = store.parent().unwrap();
-    let stub = base.join("linear-stub.sh");
-    std::fs::write(
-        &stub,
-        r#"#!/bin/sh
-echo '{"data":{"issue":{"id":"uuid-42","identifier":"ENG-42","title":"Fix login flow","description":"Users bounce.","url":"https://linear.app/acme/issue/ENG-42"}}}'
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let log = base.join("start-bd.log");
+    let stub = fake_bd(base, &log);
     let out = Command::new(bin())
-        .args(["start", "ENG-42", "--no-herdr"])
+        .args(["start", "bd-a1b2", "--no-herdr"])
         .env("MURMUR_DIR", &store)
-        .env("MURMUR_LINEAR_CURL", &stub)
-        .env("LINEAR_API_KEY", "test-key")
+        .env("MURMUR_BEADS", &stub)
         .env_remove("HERDR_ENV")
         .env_remove("MURMUR_HERDR")
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("linear-ENG-42"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("bd-a1b2"), "{}", stdout(&out));
     assert!(stdout(&out).contains("Fix login flow"), "{}", stdout(&out));
-    let list = murmur(&store, &["task", "list"]);
-    assert!(stdout(&list).contains("linear-ENG-42"));
-}
-
-#[test]
-fn start_reads_issue_from_linear_mcp() {
-    use std::os::unix::fs::PermissionsExt;
-    let store = fresh_dir("start-mcp");
-    let base = store.parent().unwrap();
-    let stub = base.join("linear-mcp.sh");
-    std::fs::write(
-        &stub,
-        r#"#!/bin/sh
-body=$(cat)
-case "$body" in
-  *get_issue*)
-    echo '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"id\":\"ENG-42\",\"title\":\"Fix login flow\",\"description\":\"Users bounce.\",\"url\":\"https://linear.app/acme/issue/ENG-42\"}"}]}}' ;;
-  *)
-    echo '{"jsonrpc":"2.0","id":1,"error":{"message":"unexpected"}}' ;;
-esac
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let out = Command::new(bin())
-        .args(["start", "ENG-42", "--no-herdr"])
-        .env("MURMUR_DIR", &store)
-        .env("MURMUR_LINEAR_MCP", &stub)
-        .env_remove("MURMUR_LINEAR_CURL")
-        .env_remove("LINEAR_API_KEY")
-        .env_remove("HERDR_ENV")
-        .env_remove("MURMUR_HERDR")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("linear-ENG-42"), "{}", stdout(&out));
-    assert!(stdout(&out).contains("Fix login flow"), "{}", stdout(&out));
-}
-
-#[test]
-fn linear_sync_via_mcp_pulls_and_pushes() {
-    use std::os::unix::fs::PermissionsExt;
-    let store = fresh_dir("linear-mcp-sync");
-    let base = store.parent().unwrap();
-    let log = base.join("mcp-calls.log");
-    let stub = base.join("linear-mcp.sh");
-    std::fs::write(
-        &stub,
-        format!(
-            r#"#!/bin/sh
-body=$(cat)
-printf '%s\n' "$body" >> "{log}"
-case "$body" in
-  *list_issues*)
-    echo '{{"jsonrpc":"2.0","id":1,"result":{{"content":[{{"type":"text","text":"{{\"issues\":[{{\"id\":\"ENG-42\",\"title\":\"Fix login flow\",\"description\":\"Users bounce.\",\"url\":\"https://linear.app/acme/issue/ENG-42\"}}]}}"}}]}}}}' ;;
-  *save_issue*|*save_comment*)
-    echo '{{"jsonrpc":"2.0","id":1,"result":{{"content":[{{"type":"text","text":"{{\\"ok\\":true}}"}}]}}}}' ;;
-  *)
-    echo '{{"jsonrpc":"2.0","id":1,"error":{{"message":"unexpected"}}}}' ;;
-esac
-"#,
-            log = log.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let sync = || {
-        Command::new(bin())
-            .args(["task", "sync", "linear", "--team", "ENG"])
-            .env("MURMUR_DIR", &store)
-            .env("MURMUR_LINEAR_MCP", &stub)
-            .env_remove("MURMUR_LINEAR_CURL")
-            .env_remove("LINEAR_API_KEY")
-            .output()
-            .unwrap()
-    };
-    let out = sync();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("mcp"), "{}", stdout(&out));
-    assert!(stdout(&out).contains("pulled 1"), "{}", stdout(&out));
-    murmur(&store, &["task", "take", "--as", "worker-1"]);
-    let out = sync();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
     let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(calls.contains("save_issue"), "{calls}");
-    assert!(calls.contains("save_comment"), "{calls}");
-    assert!(calls.contains("started") || calls.contains("worker-1"), "{calls}");
+    assert!(calls.contains("show bd-a1b2"), "{calls}");
+    let list = murmur(&store, &["task", "list"]);
+    assert!(stdout(&list).contains("bd-a1b2"));
+}
+
+#[test]
+fn start_goal_becomes_a_bead_when_beads_is_around() {
+    let store = fresh_dir("start-goal-bead");
+    let base = store.parent().unwrap();
+    let log = base.join("goal-bd.log");
+    let stub = fake_bd(base, &log);
+    let out = Command::new(bin())
+        .args(["start", "rewrite claim TTLs", "--no-herdr"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_BEADS", &stub)
+        .env_remove("HERDR_ENV")
+        .env_remove("MURMUR_HERDR")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("bd-9f3c"), "goal got a durable bead id: {}", stdout(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("create rewrite claim TTLs"), "{calls}");
+    let list = murmur(&store, &["task", "list"]);
+    assert!(stdout(&list).contains("bd-9f3c"));
+    assert!(stdout(&list).contains("rewrite claim TTLs"));
 }
 
 #[test]
@@ -798,23 +729,13 @@ esac
             log = log.display()
         ),
     );
-    use std::os::unix::fs::PermissionsExt;
-    let curl = base.join("linear-stub.sh");
-    std::fs::write(
-        &curl,
-        r#"#!/bin/sh
-echo '{"data":{"issue":{"id":"uuid-42","identifier":"ENG-42","title":"Fix login","description":"body","url":"https://linear.app/x/issue/ENG-42"}}}'
-"#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let bd = fake_bd(base, &base.join("herd-bd.log"));
 
     let out = Command::new(bin())
-        .args(["start", "ENG-42", "--kind", "grok", "--workers", "2"])
+        .args(["start", "bd-a1b2", "--kind", "grok", "--workers", "2"])
         .env("MURMUR_DIR", &store)
         .env("MURMUR_HERDR", &stub)
-        .env("MURMUR_LINEAR_CURL", &curl)
-        .env("LINEAR_API_KEY", "test-key")
+        .env("MURMUR_BEADS", &bd)
         .env_remove("HERDR_ENV")
         .output()
         .unwrap();
@@ -860,6 +781,7 @@ esac
             .env("HERDR_PANE_ID", "w1:p1")
             .env("HERDR_PLUGIN_EVENT_JSON", event)
             .env("HERDR_PLUGIN_STATE_DIR", base.join("wake-state"))
+            .env_remove("MURMUR_BEADS")
             .output()
             .unwrap()
     };
@@ -876,5 +798,58 @@ esac
         calls.matches("agent prompt").count(),
         before,
         "must not re-prompt the same mail: {calls}"
+    );
+}
+
+#[test]
+fn herdr_idle_wake_points_an_empty_inbox_at_ready_beads_once() {
+    let store = fresh_dir("wake-beads");
+    murmur(&store, &["join", "lead"]); // the plugin is a no-op without a store
+    let base = store.parent().unwrap();
+    let log = base.join("wake-beads-herdr.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "agent get") echo '{{"result":{{"agent":{{"name":"lead","pane_id":"w1:p1","cwd":"."}}}}}}' ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    let bd = fake_bd(base, &base.join("wake-bd.log"));
+    let event = r#"{"event":"pane.agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w1:p1","workspace_id":"w1","agent_status":"idle"}}"#;
+    let run = || {
+        Command::new(bin())
+            .args(["herdr"])
+            .env("MURMUR_DIR", &store)
+            .env("MURMUR_HERDR", &stub)
+            .env("MURMUR_BEADS", &bd)
+            .env("HERDR_ENV", "1")
+            .env("HERDR_PANE_ID", "w1:p1")
+            .env("HERDR_PLUGIN_EVENT_JSON", event)
+            .env("HERDR_PLUGIN_STATE_DIR", base.join("wake-beads-state"))
+            .output()
+            .unwrap()
+    };
+    // no mail at all — the nudge should offer the ready bead instead
+    let out = run();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("agent prompt"), "{calls}");
+    assert!(calls.contains("bd-a1b2"), "names the ready bead: {calls}");
+    assert!(calls.contains("task sync beads"), "points at the pull path: {calls}");
+    // same ready set → no re-prompt
+    let before = calls.matches("agent prompt").count();
+    let out = run();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls.matches("agent prompt").count(),
+        before,
+        "must not re-nudge the same ready beads: {calls}"
     );
 }

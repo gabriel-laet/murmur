@@ -101,36 +101,40 @@ has open work.
 
 ### Start a herd
 
-One command pulls a Linear issue onto the board and, if [Herdr](https://herdr.dev) is running, stands up a named herd against it. Murmur does not become an orchestrator — it sets the room, stamps names, and hands the brief to the agents. They plan and coordinate over the board and inboxes after that.
+One command pulls a bead onto the board and, if [Herdr](https://herdr.dev) is running, stands up a named herd against it. Murmur does not become an orchestrator — it sets the room, stamps names, and hands the brief to the agents. They plan and coordinate over the board and inboxes after that.
 
 ```bash
-murmur start ENG-42 --kind grok          # issue → board → lead + worker in Herdr
-murmur start "rewrite claim TTLs" --linear ENG-42 --workers 3 --kind claude
+murmur start bd-a1b2 --kind grok         # bead → board → lead + worker in Herdr
+murmur start "rewrite claim TTLs" --workers 3 --kind claude   # goal → new bead → herd
 murmur start "just the board" --no-herdr # skip panes; print how to join
 ```
 
 Inside Herdr, `MURMUR_AGENT` is the pane's agent name (`lead`, `w1`, …), so `murmur send lead "…"` and `herdr agent prompt lead` address the same being. After `murmur setup`, idle panes get a nudge when mail is waiting.
 
-### Linear adapter
+### Beads adapter
 
-Humans plan in Linear; agents execute on the board; status flows back.
-If Linear MCP is already authenticated in Grok (`~/.grok`, `/mcps`), murmur
-reads that session — no API key. `LINEAR_API_KEY` is only a fallback.
+[Beads](https://github.com/steveyegge/beads) (`bd`) is the agent-native
+tracker: local-first, git-distributed, a dependency graph with ready-work
+detection. Beads owns planning, priorities, and long-term memory across
+sessions; the board owns the atomic-take mechanics. The stack is three
+timescales — beads is memory, murmur is the nervous system, herdr is
+attention — and murmur is the only layer that talks to both ends.
 
 ```bash
-murmur start ENG-42 --kind grok          # get_issue via Linear MCP
-murmur task sync linear --team ENG --label agents
+murmur start bd-a1b2 --kind grok   # bd show → board → herd
+murmur task sync beads             # ready beads ⇄ board
 ```
 
 Sync is bidirectional and idempotent — run it by hand, from a hook, or on a
-cron. Open issues (optionally filtered by label) land on the board as
-`linear-ENG-42`-style tasks, so `murmur task done linear-ENG-42` reads
-naturally and re-syncs never duplicate. Local transitions push back as
-workflow-state changes with an attributed comment: take → *In Progress*
-("Taken by agent `worker-1` via murmur"), done → *Done*, drop → back to
-*Todo*. Linear keeps planning, priorities, and history; the board keeps the
-atomic-take mechanics. Transport is `curl` against Linear's GraphQL API — no
-SDK, and the key never touches disk.
+cron. Only *ready* beads (no open blockers) land on the board, keeping
+their own ids, so `murmur task done bd-a1b2` reads naturally and re-syncs
+never duplicate. Local transitions push back: take → `in_progress` with the
+agent as assignee, done → closed with attribution ("Completed by agent
+worker-1 via murmur"), drop → back to open. With the Herdr plugin
+installed, an idle pane with an empty inbox gets pointed at ready beads —
+herdr notices free attention, murmur routes it, beads supplies the work.
+Transport is the `bd` CLI — no SDK, no daemon, `.beads/` internals never
+touched — and beads rides git across machines the way murmur rides ssh.
 
 ## Request/reply
 
@@ -346,8 +350,8 @@ murmur claim <path>        # advisory claim (--ttl secs)
 murmur release <path>      # release a claim
 murmur claims              # list active claims
 murmur task add|list|take|done|drop   # shared work queue
-murmur task sync linear --team ENG    # reconcile the board with Linear
-murmur start [goal|ENG-42]            # Linear issue → board → Herdr herd
+murmur task sync beads                # reconcile the board with beads (bd)
+murmur start [goal|bd-a1b2]           # bead → board → Herdr herd
 murmur secret exec NAME=<ref> -- cmd  # resolve secret refs into a command's env
 murmur secret resolve <ref>           # resolve to stdout (prefer exec)
 murmur log [-n N]          # recent message history

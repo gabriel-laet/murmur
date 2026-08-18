@@ -340,8 +340,11 @@ fn agents_md_section() -> String {
         - **Identity.** Use `$MURMUR_AGENT` as your name if set; inside Herdr the pane's\n\
         agent name is used automatically. Otherwise pick a short stable one\n\
         (e.g. `codex-1`) and use it consistently via `--as <name>`.\n\
-        - **Kick off work.** `murmur start ENG-42 --kind grok` pulls the Linear issue\n\
+        - **Kick off work.** `murmur start bd-a1b2 --kind grok` pulls the bead\n\
         onto the board and, if Herdr is running, starts a named herd against it.\n\
+        - **Durable work lives in beads.** Plan in `bd` (`bd create`, `bd dep add`,\n\
+        `bd show`); `murmur task sync beads` mirrors ready beads onto the board and\n\
+        pushes take/done back. Record decisions in beads, chatter in murmur.\n\
         - **Announce yourself** once per session: `murmur join <name>`.\n\
         - **Check your mail** between tasks and before finishing:\n\
         `murmur inbox --as <name>`. Reply to questions with the command shown.\n\

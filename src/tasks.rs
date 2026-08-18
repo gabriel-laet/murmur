@@ -34,7 +34,7 @@ pub struct Task {
     pub taken_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_by: Option<String>,
-    /// backend-side id when this task mirrors an external tracker (Linear issue uuid)
+    /// backend-side id when this task mirrors an external tracker (bead id)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

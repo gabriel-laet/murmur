@@ -1,7 +1,7 @@
+mod beads;
 mod commands;
 mod herdr;
 mod hook;
-mod linear;
 mod mcp;
 mod secrets;
 mod setup;
@@ -25,7 +25,7 @@ Identity comes from --as <name>, $MURMUR_AGENT, or the Herdr pane name.
 
 QUICK START:
     murmur setup                           # wire every installed harness + Herdr plugin
-    murmur start ENG-42 --kind grok        # Linear issue → board → Herdr herd
+    murmur start bd-a1b2 --kind grok       # bead → board → Herdr herd
     murmur send frontend \"API is ready\"    # message a peer (delivered even if they're busy)
     murmur send '*' \"rebasing main\"        # broadcast to everyone
     murmur send db \"schema ok?\" --reply    # ask and block for the answer
@@ -160,13 +160,13 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Stand up a herd for a piece of work: Linear issue → board → Herdr panes
+    /// Stand up a herd for a piece of work: bead → board → Herdr panes
     Start {
-        /// What to work on. A Linear id like ENG-42 is enough on its own.
+        /// What to work on. A bead id like bd-a1b2 is enough on its own.
         goal: Option<String>,
-        /// Linear issue id (ENG-42). Implied when GOAL looks like one.
+        /// Bead id (bd-a1b2). Implied when GOAL looks like one.
         #[arg(long)]
-        linear: Option<String>,
+        bead: Option<String>,
         /// How many agents to start (lead + workers). Default 2.
         #[arg(long, default_value_t = 2)]
         workers: usize,
@@ -240,16 +240,10 @@ enum TaskCmd {
         #[arg(long = "as", value_name = "NAME")]
         r#as: Option<String>,
     },
-    /// Reconcile the board with an external tracker (currently: linear)
+    /// Reconcile the board with the tracker (currently: beads)
     Sync {
-        /// Adapter name (linear)
+        /// Adapter name (beads)
         backend: String,
-        /// Team key, e.g. ENG (or $LINEAR_TEAM)
-        #[arg(long)]
-        team: Option<String>,
-        /// Only pull issues carrying this label
-        #[arg(long)]
-        label: Option<String>,
     },
 }
 
@@ -283,7 +277,7 @@ fn run() -> anyhow::Result<()> {
             TaskCmd::Take { r#as, json } => commands::task_take(r#as, json),
             TaskCmd::Done { id, r#as } => commands::task_done(&id, r#as),
             TaskCmd::Drop { id, r#as } => commands::task_drop(&id, r#as),
-            TaskCmd::Sync { backend, team, label } => commands::task_sync(&backend, team, label),
+            TaskCmd::Sync { backend } => commands::task_sync(&backend),
         },
         Command::Sync { target, stdio } => {
             if stdio {
@@ -298,8 +292,8 @@ fn run() -> anyhow::Result<()> {
             SecretCmd::Exec { pairs, command } => commands::secret_exec(pairs, command),
         },
         Command::Setup { all } => setup::run(all),
-        Command::Start { goal, linear, workers, kind, no_herdr } => {
-            start::run(start::Opts { goal, linear, workers, kind, no_herdr })
+        Command::Start { goal, bead, workers, kind, no_herdr } => {
+            start::run(start::Opts { goal, bead, workers, kind, no_herdr })
         }
         Command::Mcp => mcp::run(),
         Command::Hook => hook::run(),

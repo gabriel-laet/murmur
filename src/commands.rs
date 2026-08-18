@@ -350,12 +350,9 @@ pub fn task_drop(id: &str, name: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn task_sync(backend: &str, team: Option<String>, label: Option<String>) -> Result<()> {
-    anyhow::ensure!(backend == "linear", "unknown task backend '{}' (supported: linear)", backend);
-    let team = team
-        .or_else(|| std::env::var("LINEAR_TEAM").ok())
-        .context("which team? pass --team ENG or set LINEAR_TEAM")?;
-    crate::linear::sync(&team, label.as_deref())
+pub fn task_sync(backend: &str) -> Result<()> {
+    anyhow::ensure!(backend == "beads", "unknown task backend '{}' (supported: beads)", backend);
+    crate::beads::sync()
 }
 
 /// Prints the value to stdout. `exec` is the safer path — values in a
