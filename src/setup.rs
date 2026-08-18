@@ -35,6 +35,7 @@ pub fn run(all: bool) -> Result<()> {
     record(".claude/settings.json (hooks)", install_hooks()?);
     record(".mcp.json (Claude Code MCP)", install_mcp_json()?);
     record("AGENTS.md (universal contract)", install_agents_md()?);
+    record("FLEET.md (fleet roster)", crate::fleet::seed()?);
 
     // Detected harnesses — or every supported one with --all.
     for h in HARNESSES {
@@ -65,7 +66,8 @@ pub fn run(all: bool) -> Result<()> {
     }
     println!("\nEvery agent session in this repo now shares one .murmur/ — inboxes, task board, claims.");
     println!("Set MURMUR_AGENT=<name> per session to pick agent names; inside Herdr the pane name is used.");
-    println!("Start a herd with: murmur start ENG-42 --kind grok");
+    println!("Start a herd with: murmur start bd-a1b2 --kind grok  (mixed: --kind claude,codex=2)");
+    println!("Route by strength: edit FLEET.md — the lead's brief carries it verbatim.");
     println!("Watch the cross-tool traffic with: murmur watch");
     Ok(())
 }

@@ -531,6 +531,14 @@ fn setup_is_idempotent_and_merges() {
     let agents = std::fs::read_to_string(workdir.join("AGENTS.md")).unwrap();
     assert_eq!(agents.matches("murmur:begin").count(), 1);
     assert!(agents.contains("murmur inbox"));
+
+    // FLEET.md is seeded once and never clobbered.
+    let fleet = std::fs::read_to_string(workdir.join("FLEET.md")).unwrap();
+    assert!(fleet.contains("Fleet roster"), "{fleet}");
+    std::fs::write(workdir.join("FLEET.md"), "# mine\n").unwrap();
+    let out = run(&["setup"]);
+    assert!(out.status.success());
+    assert_eq!(std::fs::read_to_string(workdir.join("FLEET.md")).unwrap(), "# mine\n");
 }
 
 #[test]
@@ -702,6 +710,65 @@ fn start_goal_becomes_a_bead_when_beads_is_around() {
     let list = murmur(&store, &["task", "list"]);
     assert!(stdout(&list).contains("bd-9f3c"));
     assert!(stdout(&list).contains("rewrite claim TTLs"));
+}
+
+#[test]
+fn start_mixes_kinds_and_hands_the_lead_the_fleet_roster() {
+    let store = fresh_dir("start-fleet");
+    let base = store.parent().unwrap();
+    let log = base.join("fleet-herdr.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "status --json") echo '{{"server":{{"running":true}}}}' ;;
+  "agent list") echo '{{"result":{{"agents":[]}}}}' ;;
+  "workspace create") echo '{{"result":{{"root_pane":{{"pane_id":"w1:p0"}}}}}}' ;;
+  "pane split")
+    n=$(grep -c "pane split" "{log}" || true)
+    echo "{{\"result\":{{\"pane\":{{\"pane_id\":\"w1:p$n\"}}}}}}" ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    let bd = fake_bd(base, &base.join("fleet-bd.log"));
+    std::fs::write(
+        base.join("FLEET.md"),
+        "# Fleet roster\ncodex: tests and sweeps. claude: review.\n",
+    )
+    .unwrap();
+
+    let out = Command::new(bin())
+        .args(["start", "bd-a1b2", "--kind", "claude,codex=2"])
+        .current_dir(base)
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .env("MURMUR_BEADS", &bd)
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    // the mix: one claude lead, two codex workers
+    assert!(calls.contains("agent start lead --kind claude"), "{calls}");
+    assert!(calls.contains("agent start w1 --kind codex"), "{calls}");
+    assert!(calls.contains("agent start w2 --kind codex"), "{calls}");
+    // the lead's brief carries the roster verbatim — and only the lead's
+    assert_eq!(
+        calls.matches("codex: tests and sweeps").count(),
+        1,
+        "roster goes to the lead only: {calls}"
+    );
+    // everyone knows what they are and what their peers are
+    assert!(calls.contains("you are agent 'lead' (claude)"), "{calls}");
+    assert!(calls.contains("you are agent 'w1' (codex)"), "{calls}");
+    assert!(calls.contains("lead (claude)"), "{calls}");
+    assert!(stdout(&out).contains("lead (claude), w1 (codex), w2 (codex)"), "{}", stdout(&out));
 }
 
 #[test]

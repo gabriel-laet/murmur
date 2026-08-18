@@ -65,6 +65,17 @@ integration tiers, all over the same directory:
 
 Adding a harness must stay a ~50-line adapter, never a fork of semantics.
 
+Heterogeneity is also *why* coordination is worth anything: if every agent
+were the same model, coordination would collapse into parallelism. The
+knowledge of which kind fits which work is judgment, so it is data, not
+code: `FLEET.md` (next to `AGENTS.md`, seeded by setup, rides git) is a
+human-curated roster that `murmur start` pastes verbatim into the lead's
+brief. Murmur never parses it and never routes — the lead model applies it,
+the human curates it, and the beads ledger (which kind closed and reopened
+what) is the feedback loop that corrects it. A mixed herd is
+`--kind claude,codex=2`; the kernel's only contribution is spawning the mix
+and telling every agent what its peers are.
+
 Multiplexers are not competitors; they are **views**. Murmur owns durable
 shared state; a control-room TUI that wants to render agent chatter should
 consume `murmur watch --json` (stable, newline-delimited) rather than scrape

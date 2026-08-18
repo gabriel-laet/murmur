@@ -105,11 +105,26 @@ One command pulls a bead onto the board and, if [Herdr](https://herdr.dev) is ru
 
 ```bash
 murmur start bd-a1b2 --kind grok         # bead → board → lead + worker in Herdr
+murmur start bd-a1b2 --kind claude,codex=2   # mixed herd: claude leads, codex works
 murmur start "rewrite claim TTLs" --workers 3 --kind claude   # goal → new bead → herd
 murmur start "just the board" --no-herdr # skip panes; print how to join
 ```
 
 Inside Herdr, `MURMUR_AGENT` is the pane's agent name (`lead`, `w1`, …), so `murmur send lead "…"` and `herdr agent prompt lead` address the same being. After `murmur setup`, idle panes get a nudge when mail is waiting.
+
+### The fleet: heterogeneity as data
+
+Different models are good at different work — that asymmetry is the whole
+reason a mixed fleet beats N copies of one agent, and the knowledge of who's
+good at what has to live somewhere. It lives in **`FLEET.md`**, next to
+`AGENTS.md`, seeded by `murmur setup`: a short, human-curated table of each
+kind's strengths, weaknesses, and cost. Murmur never parses it. At
+`murmur start`, the lead's brief carries the roster verbatim, every agent's
+brief names its peers with their kinds (`w1 (codex)`), and the lead routes
+slices to whoever fits. Judgment stays in the coordinator model and in the
+file you edit; the kernel just delivers it. When the ledger proves the
+roster wrong — beads records which kind closed and reopened what — update
+the file.
 
 ### Beads adapter
 
@@ -352,6 +367,7 @@ murmur claims              # list active claims
 murmur task add|list|take|done|drop   # shared work queue
 murmur task sync beads                # reconcile the board with beads (bd)
 murmur start [goal|bd-a1b2]           # bead → board → Herdr herd
+                                      #   --kind claude,codex=2 mixes the fleet
 murmur secret exec NAME=<ref> -- cmd  # resolve secret refs into a command's env
 murmur secret resolve <ref>           # resolve to stdout (prefer exec)
 murmur log [-n N]          # recent message history

@@ -1,5 +1,6 @@
 mod beads;
 mod commands;
+mod fleet;
 mod herdr;
 mod hook;
 mod mcp;
@@ -170,7 +171,7 @@ enum Command {
         /// How many agents to start (lead + workers). Default 2.
         #[arg(long, default_value_t = 2)]
         workers: usize,
-        /// Herdr agent kind: grok, claude, codex, …
+        /// Agent kind (grok), or a mixed herd: claude,codex=2 (first entry leads)
         #[arg(long)]
         kind: Option<String>,
         /// Set up the board only; don't spawn Herdr panes
