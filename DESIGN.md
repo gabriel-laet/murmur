@@ -53,7 +53,10 @@ should consume `murmur watch --json`, not scrape terminals. `murmur start`
 is userland policy — pull a bead, ask herdr for panes, deliver the brief,
 then get out of the way. Identity is the seam: a herdr pane's agent name
 *is* the murmur name, and the herdr plugin nudges idle panes (mail first,
-ready beads when the inbox is empty).
+ready beads when the inbox is empty). `--worktree` extends the same policy
+to git: one worktree per agent (isolation instead of claims), the lead's
+branch as the integration branch, merge discipline in the brief — the
+kernel never merges, and PRs stay the git host's job.
 
 ## Security by delegation
 

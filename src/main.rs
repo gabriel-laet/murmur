@@ -176,6 +176,10 @@ enum Command {
         /// Set up the board only; don't spawn Herdr panes
         #[arg(long)]
         no_herdr: bool,
+        /// One git worktree per agent (branch herd/<slug>/<name>); the lead's
+        /// branch is the integration branch and only the lead merges
+        #[arg(long)]
+        worktree: bool,
     },
     /// MCP server over stdio (messaging, claims, and task tools)
     Mcp,
@@ -293,8 +297,8 @@ fn run() -> anyhow::Result<()> {
             SecretCmd::Exec { pairs, command } => commands::secret_exec(pairs, command),
         },
         Command::Setup { all } => setup::run(all),
-        Command::Start { goal, bead, workers, kind, no_herdr } => {
-            start::run(start::Opts { goal, bead, workers, kind, no_herdr })
+        Command::Start { goal, bead, workers, kind, no_herdr, worktree } => {
+            start::run(start::Opts { goal, bead, workers, kind, no_herdr, worktree })
         }
         Command::Mcp => mcp::run(),
         Command::Hook => hook::run(),

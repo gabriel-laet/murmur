@@ -862,6 +862,83 @@ esac
 }
 
 #[test]
+fn start_worktree_isolates_agents_and_briefs_the_merge_queue() {
+    let store = fresh_dir("start-wt");
+    let base = store.parent().unwrap();
+    let repo = base.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        assert!(out.status.success(), "git {:?}: {}", args, stderr(&out));
+    };
+    git(&["init", "-q"]);
+    git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init", "-q"]);
+
+    let log = base.join("wt-herdr.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "status --json") echo '{{"server":{{"running":true}}}}' ;;
+  "agent list") echo '{{"result":{{"agents":[]}}}}' ;;
+  "workspace create") echo '{{"result":{{"root_pane":{{"pane_id":"w1:p0"}}}}}}' ;;
+  "pane split")
+    n=$(grep -c "pane split" "{log}" || true)
+    echo "{{\"result\":{{\"pane\":{{\"pane_id\":\"w1:p$n\"}}}}}}" ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    let bd = fake_bd(base, &base.join("wt-bd.log"));
+
+    let out = Command::new(bin())
+        .args(["start", "bd-a1b2", "--kind", "grok", "--workers", "2", "--worktree"])
+        .current_dir(&repo)
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .env("MURMUR_BEADS", &bd)
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // real worktrees on real branches, as siblings of the repo
+    for name in ["lead", "w1"] {
+        let dir = base.join(format!("repo--bd-a1b2-{name}"));
+        assert!(dir.join(".git").exists(), "worktree missing for {name}");
+    }
+    let branches = Command::new("git").args(["branch", "--list"]).current_dir(&repo).output().unwrap();
+    let branches = stdout(&branches);
+    assert!(branches.contains("herd/bd-a1b2/lead"), "{branches}");
+    assert!(branches.contains("herd/bd-a1b2/w1"), "{branches}");
+
+    // panes get the worktree as cwd and the shared store pinned
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("repo--bd-a1b2-w1"), "{calls}");
+    assert!(calls.contains("MURMUR_DIR="), "{calls}");
+    // the briefs carry the discipline: workers isolate, lead owns merges
+    assert!(calls.contains("your own git worktree on branch herd/bd-a1b2/w1"), "{calls}");
+    assert!(calls.contains("merge queue"), "{calls}");
+    assert!(calls.contains("integration branch"), "{calls}");
+
+    // re-running reuses the worktrees instead of erroring
+    let out = Command::new(bin())
+        .args(["start", "bd-a1b2", "--kind", "grok", "--workers", "2", "--worktree"])
+        .current_dir(&repo)
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .env("MURMUR_BEADS", &bd)
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "rerun: {}", stderr(&out));
+}
+
+#[test]
 fn herdr_idle_wake_prompts_once_per_message() {
     let store = fresh_dir("wake");
     murmur(&store, &["send", "lead", "please review", "--as", "alice"]);

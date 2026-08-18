@@ -94,8 +94,16 @@ and inboxes — murmur never supervises.
 ```bash
 murmur start bd-a1b2 --kind grok             # lead + worker
 murmur start bd-a1b2 --kind claude,codex=2   # mixed: claude leads, codex works
+murmur start bd-a1b2 --kind grok --worktree  # one git worktree per agent
 murmur start "fix claim TTLs" --no-herdr     # board only; prints how to join
 ```
+
+With `--worktree`, each agent works in its own worktree (a sibling of the
+repo, branch `herd/<slug>/<name>`) and never touches your checkout; panes
+share one `.murmur` via `MURMUR_DIR`. The lead's branch is the integration
+branch and its brief carries the merge queue: merge worker branches one at
+a time, test after each, only the lead merges. Isolation replaces claims
+within the herd; PRs and review stay on your git host.
 
 Different models are good at different work — that's what `FLEET.md` holds:
 a short, human-curated table of each kind's strengths and cost. Murmur never

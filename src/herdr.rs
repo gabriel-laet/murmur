@@ -112,7 +112,13 @@ pub fn unique_name(base: &str, used: &HashSet<String>) -> String {
     format!("{base}-x")
 }
 
-pub fn split_pane(from: Option<&str>, name: &str, cwd: &Path, direction: &str) -> Result<String> {
+pub fn split_pane(
+    from: Option<&str>,
+    name: &str,
+    cwd: &Path,
+    direction: &str,
+    murmur_dir: Option<&Path>,
+) -> Result<String> {
     let cwd_s = cwd.display().to_string();
     let mut args = vec![
         "pane".into(),
@@ -127,6 +133,12 @@ pub fn split_pane(from: Option<&str>, name: &str, cwd: &Path, direction: &str) -
         "--env".into(),
         "MURMUR_HARNESS=herdr".into(),
     ];
+    if let Some(dir) = murmur_dir {
+        // A worktree pane sits outside the repo, so walking up would miss
+        // the herd's shared store — pin it explicitly.
+        args.push("--env".into());
+        args.push(format!("MURMUR_DIR={}", dir.display()));
+    }
     if let Some(pane) = from {
         args.push(pane.into());
     } else {
