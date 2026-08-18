@@ -234,6 +234,12 @@ Transport phases:
   Per-entry signatures for *transitive* provenance (trusting A's entries
   relayed via B without trusting B) arrive with phase 2's keypairs; over
   direct ssh, the peer is already authenticated by ssh itself.
+- **Phase 1.5 — peers (built)**: `.murmur/peers` lists targets and murmur
+  syncs opportunistically — forced after `send`, debounced (30s default) on
+  `inbox`, in the hook, and in the idle-wake plugin — so convergence needs
+  no human and still no daemon. Best-effort, non-interactive ssh
+  (BatchMode, 3s connect timeout): a dead peer can warn, never hang a hook.
+  One-way reachability suffices: every sync exchanges both directions.
 - **Phase 2 — `murmur peer`** (*deliberately deferred*: harness breadth
   beats push latency — at agent timescales a per-turn phase-1 sync is live
   enough, and no competitor pressure exists on this axis): a per-machine

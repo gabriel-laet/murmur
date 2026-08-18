@@ -368,6 +368,51 @@ fn sync(from: &PathBuf, to: &std::path::Path) -> Output {
 }
 
 #[test]
+fn peers_auto_sync_converges_mailboxes_without_manual_sync() {
+    let a = fresh_dir("peers-a");
+    let b = fresh_dir("peers-b");
+    murmur(&a, &["join", "alice"]); // create a's store so the peer list has a home
+    std::fs::write(a.join("peers"), format!("# my fleet\n{}\n", b.display())).unwrap();
+
+    // send from a pushes to the peer immediately — bob reads on b, no sync run
+    murmur(&a, &["send", "bob", "ping across machines", "--as", "alice"]);
+    let out = murmur(&b, &["inbox", "--as", "bob"]);
+    assert!(stdout(&out).contains("alice: ping across machines"), "{}", stdout(&out));
+
+    // bob replies on b, which lists no peers (one-way reachability);
+    // alice's next inbox pulls it, because every sync is a two-way exchange
+    murmur(&b, &["send", "alice", "pong back", "--as", "bob"]);
+    let out = Command::new(bin())
+        .args(["inbox", "--as", "alice"])
+        .env("MURMUR_DIR", &a)
+        .env("MURMUR_SYNC_INTERVAL", "0")
+        .env_remove("MURMUR_AGENT")
+        .output()
+        .unwrap();
+    assert!(stdout(&out).contains("bob: pong back"), "{}", stdout(&out));
+}
+
+#[test]
+fn sync_without_target_walks_the_peer_list() {
+    let a = fresh_dir("peers-cmd-a");
+    let b = fresh_dir("peers-cmd-b");
+    murmur(&a, &["join", "alice"]);
+
+    // no peers listed → a helpful error, not a crash
+    let out = murmur(&a, &["sync"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("peers"), "{}", stderr(&out));
+
+    std::fs::write(a.join("peers"), format!("{}\n", b.display())).unwrap();
+    murmur(&a, &["send", "bob", "queued for the peer", "--as", "alice"]);
+    let out = murmur(&a, &["sync"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("synced with"), "{}", stdout(&out));
+    let out = murmur(&b, &["inbox", "--as", "bob"]);
+    assert!(stdout(&out).contains("queued for the peer"), "{}", stdout(&out));
+}
+
+#[test]
 fn sync_delivers_messages_across_stores() {
     let a = fresh_dir("sync-a");
     let b = fresh_dir("sync-b");

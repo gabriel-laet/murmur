@@ -11,7 +11,6 @@ mod store;
 mod sync;
 mod tasks;
 
-use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -283,9 +282,10 @@ fn run() -> anyhow::Result<()> {
         Command::Sync { target, stdio } => {
             if stdio {
                 sync::run_stdio(target)
-            } else {
-                let target = target.context("sync with what? give a path or user@host[:path]")?;
+            } else if let Some(target) = target {
                 sync::run(&target)
+            } else {
+                sync::run_peers()
             }
         }
         Command::Secret { cmd } => match cmd {

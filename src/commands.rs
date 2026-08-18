@@ -46,17 +46,24 @@ pub fn send(
     };
     let store = Store::locate()?;
     let (recipients, id) = store.send(&from, to, &body, reply_to.as_deref(), await_reply)?;
+    crate::sync::auto(&store, true); // push to peers now, not next interval
     if !await_reply {
         println!("delivered to {}", recipients.join(", "));
         return Ok(());
     }
     eprintln!("delivered to {}, waiting for a reply...", recipients.join(", "));
-    match store.await_reply(&from, &id, Duration::from_secs(timeout))? {
-        Some(reply) => {
+    // Wait in slices so a reply travelling through a peer sync still arrives.
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    loop {
+        let slice = Duration::from_secs(2).min(deadline.saturating_duration_since(Instant::now()));
+        if let Some(reply) = store.await_reply(&from, &id, slice)? {
             println!("{}", reply.body);
-            Ok(())
+            return Ok(());
         }
-        None => anyhow::bail!("no reply within {}s (message stays delivered)", timeout),
+        if Instant::now() >= deadline {
+            anyhow::bail!("no reply within {}s (message stays delivered)", timeout);
+        }
+        crate::sync::auto(&store, false);
     }
 }
 
@@ -65,6 +72,7 @@ pub fn inbox(name: Option<String>, wait: bool, timeout: u64, peek: bool, json: b
     let store = Store::locate()?;
     let deadline = (timeout > 0).then(|| Instant::now() + Duration::from_secs(timeout));
     loop {
+        crate::sync::auto(&store, false); // debounced; pulls mail from peers
         let msgs = store.drain(&name, peek)?;
         if !msgs.is_empty() {
             print_msgs(&msgs, json);

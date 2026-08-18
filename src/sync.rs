@@ -75,20 +75,51 @@ fn resolve_store(path: &Path) -> Store {
 pub fn run(target: &str) -> Result<()> {
     let local = Store::locate()?;
     local.init()?;
+    let (label, sent, received) = sync_once(&local, target, false)?;
+    println!("synced with {}: sent {} entries, received {}", label, sent, received);
+    Ok(())
+}
+
+/// `murmur sync` with no target: reconcile with every listed peer.
+pub fn run_peers() -> Result<()> {
+    let local = Store::locate()?;
+    local.init()?;
+    let peers = peers(&local);
+    if peers.is_empty() {
+        bail!(
+            "sync with what? give a path or user@host[:path], or list peers \
+             (one per line) in {}",
+            local.root().join("peers").display()
+        );
+    }
+    for peer in &peers {
+        match sync_once(&local, peer, false) {
+            Ok((label, sent, received)) => {
+                println!("synced with {}: sent {} entries, received {}", label, sent, received)
+            }
+            Err(e) => eprintln!("murmur: sync {}: {}", peer, e),
+        }
+    }
+    let _ = touch_stamp(&local);
+    Ok(())
+}
+
+/// One reconciliation with one target. `batch_mode` makes ssh non-interactive
+/// and quick to give up, for opportunistic syncs that must never hang a hook.
+fn sync_once(local: &Store, target: &str, batch_mode: bool) -> Result<(String, usize, usize)> {
     match parse_target(target) {
         Target::Local(path) => {
             let remote = resolve_store(&path);
             remote.init()?;
-            let (sent, received) = sync_pair(&local, &remote)?;
-            println!(
-                "synced with {}: sent {} entries, received {}",
-                remote.root().display(), sent, received
-            );
-            Ok(())
+            let (sent, received) = sync_pair(local, &remote)?;
+            Ok((remote.root().display().to_string(), sent, received))
         }
         Target::Ssh { host, path } => {
             let ssh = std::env::var("MURMUR_SYNC_SSH").unwrap_or_else(|_| "ssh".into());
             let mut cmd = std::process::Command::new(ssh);
+            if batch_mode {
+                cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3"]);
+            }
             cmd.arg(&host).args(["murmur", "sync", "--stdio"]);
             if let Some(p) = &path {
                 cmd.arg(p);
@@ -105,21 +136,93 @@ pub fn run(target: &str) -> Result<()> {
             let their_hello: Hello = recv_json(&mut r).context(
                 "no hello from the remote end — is murmur installed there and on PATH?",
             )?;
-            let batch = make_batch(&local, &their_hello.vector)?;
+            let batch = make_batch(local, &their_hello.vector)?;
             let sent: usize = batch.logs.values().map(|s| s.entries.len()).sum();
             send_json(&mut w, &batch)?;
             let their_batch: Batch = recv_json(&mut r).context("remote closed before sending its batch")?;
             let received: usize = their_batch.logs.values().map(|s| s.entries.len()).sum();
-            apply_batch(&local, their_batch)?;
+            apply_batch(local, their_batch)?;
             drop(w);
             let status = child.wait()?;
             if !status.success() {
                 bail!("remote sync process exited with {}", status);
             }
-            println!("synced with {}: sent {} entries, received {}", host, sent, received);
-            Ok(())
+            Ok((host, sent, received))
         }
     }
+}
+
+/// Machine-local peer list: `.murmur/peers`, one target per line (`#`
+/// comments), plus `MURMUR_SYNC_PEERS` (comma-separated). Peers are
+/// per-machine trust — like git remotes — which is why the list lives in
+/// the gitignored store, not the repo. Reachability can be one-way: a
+/// laptop that can ssh to a buildbox lists it; the buildbox lists nothing
+/// and still converges, because every sync is a two-way exchange.
+pub fn peers(store: &Store) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(store.root().join("peers")) {
+        out.extend(
+            text.lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(|l| l.to_string()),
+        );
+    }
+    if let Ok(env) = std::env::var("MURMUR_SYNC_PEERS") {
+        out.extend(env.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+    }
+    out.dedup();
+    out
+}
+
+/// Opportunistic anti-entropy with every listed peer — called from send,
+/// inbox, the hook, and the idle-wake plugin, so remote mailboxes converge
+/// without anyone running `murmur sync` by hand. Debounced (default 30s,
+/// `MURMUR_SYNC_INTERVAL` overrides; `force` bypasses, for sends) and
+/// best-effort: it never fails the caller, and a dead peer costs one
+/// warning per interval, not one per poll.
+pub fn auto(store: &Store, force: bool) {
+    let peers = peers(store);
+    if peers.is_empty() {
+        return;
+    }
+    if !force && !stamp_expired(store) {
+        return;
+    }
+    // Stamp before syncing: a slow peer must not re-trigger on every poll.
+    let _ = touch_stamp(store);
+    for peer in &peers {
+        if let Err(e) = sync_once(store, peer, true) {
+            eprintln!("murmur: auto-sync {}: {}", peer, e);
+        }
+    }
+}
+
+fn auto_interval() -> std::time::Duration {
+    let secs = std::env::var("MURMUR_SYNC_INTERVAL")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30);
+    std::time::Duration::from_secs(secs)
+}
+
+fn stamp_path(store: &Store) -> PathBuf {
+    store.root().join("tmp").join("auto-sync-stamp")
+}
+
+fn stamp_expired(store: &Store) -> bool {
+    let Ok(meta) = std::fs::metadata(stamp_path(store)) else { return true };
+    let Ok(mtime) = meta.modified() else { return true };
+    mtime.elapsed().map(|age| age >= auto_interval()).unwrap_or(true)
+}
+
+fn touch_stamp(store: &Store) -> Result<()> {
+    let path = stamp_path(store);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, b"")?;
+    Ok(())
 }
 
 /// The remote end: serve exactly one sync session over stdin/stdout.

@@ -252,6 +252,7 @@ fn run_inner() -> Result<()> {
     if !store.root().is_dir() {
         return Ok(());
     }
+    crate::sync::auto(&store, false); // idle moments are when remote mail lands
 
     let msgs = store.drain(&name, true).unwrap_or_default();
     let _ = report_mail(&pane, msgs.len());

@@ -201,8 +201,30 @@ Sync is idempotent and relays: A↔B then B↔C gives C everything from A, becau
 logs are per-origin-node. Consumed messages leave tombstones, so mail read on
 one machine disappears everywhere and never resurrects. `murmur who` shows
 remote agents with their node; broadcasts reach them once presence has synced;
-`murmur watch` shows cluster-wide chatter. Run a sync by hand, from a hook, or
-on a cron — at agent timescales, once per turn is live enough.
+`murmur watch` shows cluster-wide chatter.
+
+### Peers: sync that runs itself
+
+List peers in `.murmur/peers` (one path or `user@host[:path]` per line, `#`
+comments) and murmur reconciles opportunistically: immediately after every
+`send`, and debounced (default 30s, `MURMUR_SYNC_INTERVAL`) on `inbox`, in
+the Claude Code hook, and in the Herdr idle-wake. `murmur sync` with no
+target walks the list by hand. Best-effort and non-interactive (`BatchMode`,
+3s connect timeout) — a dead peer costs one warning per interval, never a
+hang. Peers are per-machine trust, like git remotes, so the list lives in
+the gitignored store; reachability can be one-way (the laptop lists the
+buildbox, the buildbox lists nothing) because every sync exchanges both ways.
+
+### A remote herd, with nothing new
+
+An agent on another machine is a local Herdr pane whose command is `ssh` (or
+`mosh`): the box gets the repo, `cargo install murmur && murmur setup`, and
+your `.murmur/peers` gets one line. Work crosses via git (beads), chatter
+crosses via peer sync, and herdr shows the remote terminal like any other
+pane. Ephemeral sandboxes (a cloud devbox, a CI runner) are the same recipe
+with a provisioning script in front — and agents you can't ssh into at all
+(Claude Code on the web, GitHub Actions) still participate in the durable
+layer, because beads rides the repo itself.
 
 Honest physics: there is no atomic rename across machines. If two nodes take
 the same task during a partition, the conflict resolves deterministically on
@@ -379,7 +401,8 @@ murmur secret resolve <ref>           # resolve to stdout (prefer exec)
 murmur log [-n N]          # recent message history
 murmur watch               # follow all traffic live (--all for history)
 murmur clean               # prune dead agents + expired claims (--all: rm .murmur)
-murmur sync <peer>         # reconcile with another .murmur (path or user@host[:path])
+murmur sync [peer]         # reconcile with another .murmur (path or user@host[:path]);
+                           #   no target = walk .murmur/peers (auto-runs on send/inbox)
 murmur setup               # wire every installed harness + AGENTS.md (--all: all supported)
 murmur mcp                 # MCP server over stdio
 murmur hook                # Claude Code hook adapter

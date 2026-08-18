@@ -42,6 +42,12 @@ pub fn run() -> anyhow::Result<()> {
     let Some(name) = agent_name(&hook) else { exit(0) };
     let Ok(store) = Store::locate() else { exit(0) };
 
+    // Mail-reading events pull from peers first (debounced, best-effort),
+    // so remote teammates reach this session without anyone running sync.
+    if matches!(event.as_str(), "SessionStart" | "PreToolUse" | "Stop") {
+        crate::sync::auto(&store, false);
+    }
+
     match event.as_str() {
         "SessionStart" => session_start(&store, &name),
         "PreToolUse" => pre_tool_use(&store, &name, &hook),
