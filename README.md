@@ -44,8 +44,11 @@ murmur setup --all    # or wire all supported harnesses regardless
 | Gemini CLI      | MCP in `.gemini/settings.json`                         |
 | Grok CLI        | MCP in `.grok/settings.json`                           |
 | OpenCode        | MCP in `opencode.json`                                 |
-| Herdr           | plugin: idle-wake + pane names become murmur names     |
+| Herdr           | plugin: idle-wake (mail + ready beads); pane names become murmur names |
 | everything else | the coordination contract in `AGENTS.md`               |
+
+Setup also seeds `FLEET.md` — the human-curated roster of which agent kind
+is good at what, carried verbatim into every herd lead's brief.
 
 Existing config is merged, never clobbered. Agents launched through a wired
 harness get harness-derived names (`claude-a1b2c3`, `codex-4410`, ...);
@@ -97,7 +100,10 @@ murmur task list                      # todo + doing (--all includes done)
 
 Point N agents at the same board and they self-organize: each takes a task,
 works, completes, takes the next. The hook tells idle agents when the board
-has open work.
+has open work. The board is the staging area, not the tracker: with
+[beads](#beads-adapter) installed, ready beads flow onto it and take/done
+flow back (`murmur task sync beads`) — planning and long-term memory live
+in `bd`, the board keeps the atomic-take mechanics.
 
 ### Start a herd
 
@@ -390,8 +396,9 @@ murmur hook                # Claude Code hook adapter
   message. Multi-agent systems fail silently without this.
 - **Polling, not push.** `--wait` and `watch` poll at 100–200 ms, which is
   invisible at agent timescales and keeps the implementation dependency-free.
-- **Single machine by design** — though a shared volume between containers
-  works for free, which sockets never could.
+- **Local-first, replicated when needed.** One machine needs zero setup; a
+  shared volume between containers works for free; across machines,
+  `murmur sync` reconciles directories over ssh — replication, never servers.
 - **Liveness** is "is the pid that invoked murmur still alive", tracked via
   the parent process, plus a `last_seen` timestamp. Good enough to answer
   "is anyone actually there?" without heartbeats.
