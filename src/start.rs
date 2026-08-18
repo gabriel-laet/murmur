@@ -23,7 +23,7 @@ pub struct Opts {
 
 pub fn run(opts: Opts) -> Result<()> {
     let workers = opts.workers.max(1);
-    let (bead_id, goal) = split_goal(opts.goal, opts.bead)?;
+    let (bead_id, goal) = split_goal(opts.goal, opts.bead, beads::available())?;
 
     let store = Store::locate()?;
     store.init()?;
@@ -124,9 +124,13 @@ pub fn run(opts: Opts) -> Result<()> {
     Ok(())
 }
 
+/// An explicit `--bead` always means beads (and fails loudly without `bd`);
+/// a bare id is only *detected* when beads can actually serve it, so on a
+/// machine with no beads, "phase-2" is a goal, not a lookup that errors.
 fn split_goal(
     goal: Option<String>,
     bead: Option<String>,
+    beads_here: bool,
 ) -> Result<(Option<String>, Option<String>)> {
     if let Some(id) = bead {
         return Ok((Some(id.trim().to_string()), goal));
@@ -134,7 +138,7 @@ fn split_goal(
     match goal {
         None => bail!("start what? give a bead id (bd-a1b2) or a goal string"),
         Some(g) => {
-            if looks_like_bead(&g) {
+            if beads_here && looks_like_bead(&g) {
                 Ok((Some(g.trim().to_string()), None))
             } else {
                 Ok((None, Some(g)))
@@ -269,16 +273,25 @@ mod tests {
     }
 
     #[test]
-    fn bare_bead_id_is_detected() {
-        let (id, goal) = split_goal(Some("bd-a1b2".into()), None).unwrap();
+    fn bare_bead_id_is_detected_only_when_beads_is_here() {
+        let (id, goal) = split_goal(Some("bd-a1b2".into()), None, true).unwrap();
         assert_eq!(id.as_deref(), Some("bd-a1b2"));
         assert!(goal.is_none());
+        // no beads → the same string degrades to an ordinary goal
+        let (id, goal) = split_goal(Some("bd-a1b2".into()), None, false).unwrap();
+        assert!(id.is_none());
+        assert_eq!(goal.as_deref(), Some("bd-a1b2"));
     }
 
     #[test]
     fn goal_plus_bead_flag() {
-        let (id, goal) = split_goal(Some("rewrite auth".into()), Some("bd-a1b2".into())).unwrap();
+        let (id, goal) =
+            split_goal(Some("rewrite auth".into()), Some("bd-a1b2".into()), true).unwrap();
         assert_eq!(id.as_deref(), Some("bd-a1b2"));
         assert_eq!(goal.as_deref(), Some("rewrite auth"));
+        // the explicit flag is honored even without beads — it must fail
+        // loudly at fetch, not silently become a goal
+        let (id, _) = split_goal(None, Some("bd-a1b2".into()), false).unwrap();
+        assert_eq!(id.as_deref(), Some("bd-a1b2"));
     }
 }
