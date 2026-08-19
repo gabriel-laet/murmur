@@ -1208,9 +1208,11 @@ fn doctor_lints_the_roster_against_the_machine() {
         cmd.args(["doctor"])
             .current_dir(&base)
             .env("MURMUR_DIR", &store)
+            .env("HOME", &base)
             .env_remove("HERDR_ENV")
             .env_remove("MURMUR_HERDR")
             .env_remove("CURSOR_API_KEY")
+            .env_remove("CUSROR_API_KEY")
             .env_remove("MURMUR_CURL");
         for (k, v) in envs {
             cmd.env(k, v);
@@ -1228,4 +1230,33 @@ fn doctor_lints_the_roster_against_the_machine() {
     let out = run(&[("CURSOR_API_KEY", "k"), ("MURMUR_CURL", "/bin/true")]);
     let s = stdout(&out);
     assert!(s.contains("ok    cloud:cursor"), "{s}");
+}
+
+#[test]
+fn doctor_reads_cursor_key_from_dot_secrets() {
+    let store = fresh_dir("doctor-secrets");
+    let base = store.parent().unwrap().to_path_buf();
+    git_repo_with_origin(&base);
+    std::fs::write(
+        base.join("FLEET.md"),
+        "# Fleet roster\n\n| kind | strong at |\n| --- | --- |\n| cloud:cursor | bulk |\n",
+    )
+    .unwrap();
+    std::fs::write(base.join(".secrets"), "CURSOR_API_KEY=from-file\n").unwrap();
+    let out = Command::new(bin())
+        .args(["doctor"])
+        .current_dir(&base)
+        .env("MURMUR_DIR", &store)
+        .env("HOME", &base)
+        .env("MURMUR_CURL", "/bin/true")
+        .env_remove("HERDR_ENV")
+        .env_remove("MURMUR_HERDR")
+        .env_remove("CURSOR_API_KEY")
+        .env_remove("CUSROR_API_KEY")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let s = stdout(&out);
+    assert!(s.contains("ok    cloud:cursor"), "{s}");
+    assert!(!s.contains("from-file"), "the API key must never be printed: {s}");
 }

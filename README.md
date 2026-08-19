@@ -118,7 +118,8 @@ learn a kind can't launch before a herd needs it, not after.
 
 Herdr owns execution and should eventually own cloud agents too; until it
 can, a `cloud:<backend>` kind fills the gap (today: `cloud:cursor`, via
-Cursor's background-agent API and your `CURSOR_API_KEY`):
+Cursor's background-agent API and `CURSOR_API_KEY` from the environment,
+`$HERDR_PLUGIN_CONFIG_DIR/.env`, or `~/.secrets`):
 
 ```bash
 murmur start bd-a1b2 --kind claude,cloud:cursor=2   # local lead, cloud workers

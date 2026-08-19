@@ -24,6 +24,8 @@ use std::process::{Command, Stdio};
 
 pub const PREFIX: &str = "cloud:";
 pub const CURSOR_KEY_ENV: &str = "CURSOR_API_KEY";
+/// Historical typo seen in ~/.secrets; accepted as a fallback only.
+const CURSOR_KEY_ALIAS: &str = "CUSROR_API_KEY";
 const CURSOR_API: &str = "https://api.cursor.com/v1";
 
 pub fn known_backend(backend: &str) -> bool {
@@ -148,12 +150,88 @@ fn curl_bin() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("curl"))
 }
 
+/// Fill `CURSOR_API_KEY` from the environment, `$HERDR_PLUGIN_CONFIG_DIR/.env`,
+/// or `~/.secrets`. Herdr panes inherit the server's env, which often never
+/// sourced a login-shell secrets file. Never prints the value.
+pub fn load_cursor_key() {
+    if env_nonempty(CURSOR_KEY_ENV) {
+        return;
+    }
+    if let Some(k) = env_value(CURSOR_KEY_ALIAS) {
+        std::env::set_var(CURSOR_KEY_ENV, k);
+        return;
+    }
+    for path in secret_files() {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        if let Some(k) = parse_env_value(&text, CURSOR_KEY_ENV)
+            .or_else(|| parse_env_value(&text, CURSOR_KEY_ALIAS))
+            .filter(|s| !s.is_empty())
+        {
+            std::env::set_var(CURSOR_KEY_ENV, k);
+            return;
+        }
+    }
+}
+
+pub fn cursor_key_available() -> bool {
+    load_cursor_key();
+    env_nonempty(CURSOR_KEY_ENV)
+}
+
+fn env_nonempty(key: &str) -> bool {
+    env_value(key).is_some()
+}
+
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+fn secret_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Some(dir) = env_value("HERDR_PLUGIN_CONFIG_DIR") {
+        files.push(PathBuf::from(dir).join(".env"));
+    }
+    if let Some(home) = env_value("HOME") {
+        files.push(PathBuf::from(home).join(".secrets"));
+    }
+    files
+}
+
+fn parse_env_value(contents: &str, key: &str) -> Option<String> {
+    for raw in contents.lines() {
+        let mut line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("export ") {
+            line = rest.trim();
+        }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        if k.trim() != key {
+            continue;
+        }
+        let mut v = v.trim().to_string();
+        let bytes = v.as_bytes();
+        if bytes.len() >= 2
+            && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
+                || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
+        {
+            v = v[1..v.len() - 1].to_string();
+        }
+        return Some(v);
+    }
+    None
+}
+
 /// One HTTPS call via the curl CLI — no HTTP dependency in the kernel, the
 /// same move as shelling out to ssh. The API key goes in over stdin as a
 /// curl config line, never as a process argument `ps` could see.
 fn curl(method: &str, url: &str, body: Option<&Value>) -> Result<Value> {
+    load_cursor_key();
     let key = std::env::var(CURSOR_KEY_ENV)
-        .context("cloud:cursor needs CURSOR_API_KEY (Cursor dashboard → API keys)")?;
+        .ok()
+        .filter(|s| !s.is_empty())
+        .context("cloud:cursor needs CURSOR_API_KEY (Cursor dashboard → API keys, or ~/.secrets)")?;
     let mut cmd = Command::new(curl_bin());
     cmd.args(["-sS", "-X", method, url, "-H", "Content-Type: application/json", "-K", "-"]);
     if let Some(b) = body {
@@ -189,7 +267,7 @@ fn curl(method: &str, url: &str, body: Option<&Value>) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{backend, is_cloud, normalize_repo_url};
+    use super::{backend, is_cloud, normalize_repo_url, parse_env_value};
 
     #[test]
     fn cloud_kinds_are_prefixed() {
@@ -217,5 +295,13 @@ mod tests {
             normalize_repo_url("https://github.com/acme/demo"),
             "https://github.com/acme/demo"
         );
+    }
+
+    #[test]
+    fn parse_env_value_reads_export_quotes_and_typo() {
+        let text = "# c\nexport CURSOR_API_KEY='plain'\nCUSROR_API_KEY=\"typo\"\n";
+        assert_eq!(parse_env_value(text, "CURSOR_API_KEY").as_deref(), Some("plain"));
+        assert_eq!(parse_env_value(text, "CUSROR_API_KEY").as_deref(), Some("typo"));
+        assert_eq!(parse_env_value(text, "MISSING"), None);
     }
 }

@@ -281,6 +281,7 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
+    cloud::load_cursor_key();
     match Cli::parse().command {
         Command::Send { to, message, r#as, reply, reply_to, timeout } => {
             commands::send(&to, message, r#as, reply_to, reply, timeout)

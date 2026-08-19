@@ -63,7 +63,7 @@ fn check_cloud(kind: &str) {
         return;
     }
     let mut missing = Vec::new();
-    if std::env::var(cloud::CURSOR_KEY_ENV).is_err() {
+    if !cloud::cursor_key_available() {
         missing.push(format!("{} not set", cloud::CURSOR_KEY_ENV));
     }
     if !on_path("curl") && std::env::var("MURMUR_CURL").is_err() {
