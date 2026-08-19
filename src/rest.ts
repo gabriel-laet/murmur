@@ -47,7 +47,8 @@ function parseEvent(data: string): RunEvent {
 export const rest: Provider = {
   async list() {
     const v = await call("GET", "/agents");
-    const arr = Array.isArray(v) ? v : (v.agents ?? v.data ?? []);
+    // Live API wraps as {items:[...]} (verified 2026-08-19); older shapes kept.
+    const arr = Array.isArray(v) ? v : (v.items ?? v.agents ?? v.data ?? []);
     return arr.map(toAgent).filter((a: CloudAgent) => a.id);
   },
 
@@ -57,7 +58,7 @@ export const rest: Provider = {
 
   async latestRunId(id) {
     const v = await call("GET", `/agents/${id}/runs`);
-    const runs = Array.isArray(v) ? v : (v.runs ?? v.data ?? []);
+    const runs = Array.isArray(v) ? v : (v.items ?? v.runs ?? v.data ?? []);
     const last = runs[runs.length - 1];
     return last ? String(last.id ?? last.runId) : null;
   },
@@ -88,6 +89,6 @@ export const rest: Provider = {
 
   async followup(id, text) {
     const v = await call("POST", `/agents/${id}/runs`, { prompt: { text } });
-    return { runId: String(v.id ?? v.runId ?? "") };
+    return { runId: String(v.id ?? v.runId ?? v.run?.id ?? "") };
   },
 };

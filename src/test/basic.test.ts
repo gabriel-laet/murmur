@@ -35,3 +35,28 @@ test("cloud statuses map onto herdr pane states", () => {
   assert.equal(statusToHerdrState("ARCHIVED"), "idle");
   assert.equal(statusToHerdrState("ERROR"), "idle");
 });
+
+test("sdk messages map to display events", async () => {
+  const { sdkMessageToEvent } = await import("../sdk.js");
+  const base = { agent_id: "bc-1", run_id: "r-1" };
+  assert.deepEqual(
+    sdkMessageToEvent({ type: "tool_call", ...base, call_id: "c1", name: "edit", status: "running" } as any),
+    { kind: "tool", text: "▸ edit" },
+  );
+  assert.equal(
+    sdkMessageToEvent({ type: "tool_call", ...base, call_id: "c1", name: "edit", status: "completed" } as any),
+    null,
+  );
+  assert.deepEqual(
+    sdkMessageToEvent({
+      type: "assistant", ...base,
+      message: { role: "assistant", content: [{ type: "text", text: "done." }] },
+    } as any),
+    { kind: "message", text: "done." },
+  );
+  assert.deepEqual(
+    sdkMessageToEvent({ type: "status", ...base, status: "RUNNING", message: "cloning" } as any),
+    { kind: "status", text: "RUNNING — cloning" },
+  );
+  assert.equal(sdkMessageToEvent({ type: "system", subtype: "init", ...base } as any), null);
+});

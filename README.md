@@ -23,11 +23,18 @@ export CURSOR_API_KEY=...      # Cursor dashboard → API keys
 ## Use
 
 ```bash
-herdr-cursor                   # roster: every cloud agent, live
+herdr-cursor                   # roster: every cloud agent, live (Ink TUI)
 herdr-cursor list --json       # scriptable inventory
 herdr-cursor attach bc-abc123  # stream one agent, type follow-ups
 herdr-cursor --mock            # all of the above with canned data, no key
+herdr-cursor --rest            # zero-dep REST fallback instead of the SDK
 ```
+
+The default provider is `@cursor/sdk` — `Agent.resume()` attaches to any
+`bc-` id (including agents murmur launched over REST) and `run.stream()`
+yields typed events, so the attach view renders tool calls (`▸ edit`),
+thinking (dimmed), status, and per-turn token usage distinctly. `--rest`
+keeps a dependency-free fallback over plain fetch.
 
 In the roster: `↑/↓` select, `enter` attach (inside herdr this opens a new
 pane; outside it attaches inline), `a` opens a pane per ACTIVE agent,
@@ -56,8 +63,9 @@ this tool reads only the provider API and never touches `.murmur/`.
   409 (`agent_busy`); wait it out.
 - API-created agents are hidden in Cursor's dashboard behind
   Source → SDK; this roster is the honest inventory.
-- The runs-listing and SSE payload shapes are parsed permissively
-  (`src/rest.ts`) — the API is young; fixes stay local to that file.
+- The REST fallback parses payloads permissively (`src/rest.ts`); the
+  live API wraps lists as `{items: [...]}` and nests the create response
+  as `{agent, run}` (verified against the real API, 2026-08-19).
 - `herdr pane split` flag shape is per current docs; adjust
   `src/herdr.ts` if your herdr version differs.
 

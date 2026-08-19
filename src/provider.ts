@@ -14,7 +14,7 @@ export interface CloudAgent {
 }
 
 export interface RunEvent {
-  kind: "message" | "status" | "done" | "raw";
+  kind: "message" | "status" | "tool" | "thinking" | "usage" | "done" | "raw";
   text: string;
 }
 

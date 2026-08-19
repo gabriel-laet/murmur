@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 import { mock } from "./mock.js";
 import { rest } from "./rest.js";
+import { sdk } from "./sdk.js";
 import { roster } from "./roster.js";
 import { attach } from "./attach.js";
 import type { Provider } from "./provider.js";
 
-const USAGE = "usage: herdr-cursor [roster | list [--json] | attach <agent-id>] [--mock]";
+const USAGE =
+  "usage: herdr-cursor [roster | list [--json] | attach <agent-id>] [--mock | --rest]";
 
 function pick(argv: string[]): { p: Provider; args: string[] } {
   const useMock = argv.includes("--mock") || process.env.HERDR_CURSOR_MOCK === "1";
-  return { p: useMock ? mock() : rest, args: argv.filter((a) => a !== "--mock") };
+  const useRest = argv.includes("--rest") || process.env.HERDR_CURSOR_REST === "1";
+  const p = useMock ? mock() : useRest ? rest : sdk; // SDK is the default
+  return { p, args: argv.filter((a) => a !== "--mock" && a !== "--rest") };
 }
 
 async function main(): Promise<void> {
