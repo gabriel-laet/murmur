@@ -168,7 +168,8 @@ pub fn wait_shell(pane: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn create_workspace(label: &str, cwd: &Path) -> Result<String> {
+/// Returns (workspace_id, root_pane_id).
+pub fn create_workspace(label: &str, cwd: &Path) -> Result<(String, String)> {
     let v = call(&[
         "workspace",
         "create",
@@ -178,10 +179,17 @@ pub fn create_workspace(label: &str, cwd: &Path) -> Result<String> {
         label,
         "--no-focus",
     ])?;
-    v.pointer("/result/root_pane/pane_id")
+    let pane = v
+        .pointer("/result/root_pane/pane_id")
         .and_then(|x| x.as_str())
         .map(|s| s.to_string())
-        .context("herdr workspace create returned no root pane")
+        .context("herdr workspace create returned no root pane")?;
+    let ws = v
+        .pointer("/result/workspace/workspace_id")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    Ok((ws, pane))
 }
 
 /// Herdr's `--kind` names are not always the executable. `cursor-agent` is

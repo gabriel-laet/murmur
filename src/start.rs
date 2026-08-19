@@ -127,11 +127,6 @@ pub fn run(opts: Opts) -> Result<()> {
     let mut last_pane: Option<String> = None; // last *local* pane, for splits
     let mut cloud_repo: Option<cloud::RepoRef> = None;
 
-    // Always give the herd its own Herdr workspace. Splitting the current
-    // pane when murmur itself is inside Herdr (e.g. this orchestrator)
-    // drops workers into the human's space.
-    let home = Some(herdr::create_workspace(&label, &cwd)?);
-
     for (i, (base, kind)) in roles.iter().enumerate() {
         // A cloud kind never gets a pane or a worktree: it launches on the
         // provider's VM with the brief as its prompt, and the lead learns
@@ -170,8 +165,8 @@ pub fn run(opts: Opts) -> Result<()> {
         }
         let name = herdr::unique_name(base, &used);
         used.insert(name.clone());
-        let direction = if i == 0 { "right" } else { "down" };
-        let from = last_pane.as_deref().or(home.as_deref());
+        let direction = if last_pane.is_none() { "right" } else { "down" };
+        let from = last_pane.as_deref();
         let (pane_cwd, branch) = match &repo {
             Some(repo) => match add_worktree(repo, &herd_slug, &name) {
                 Ok((dir, branch)) => {
@@ -186,7 +181,17 @@ pub fn run(opts: Opts) -> Result<()> {
             None => (cwd.clone(), None),
         };
         let murmur_dir = repo.is_some().then_some(shared_store.as_path());
-        let pane = herdr::split_pane(from, &name, &pane_cwd, direction, murmur_dir)?;
+        let pane = if last_pane.is_none() {
+            let (ws, root) = herdr::create_workspace(&label, &pane_cwd)?;
+            if !ws.is_empty() {
+                println!("space  {label}  {ws}  root {root}");
+            } else {
+                println!("space  {label}  root {root}");
+            }
+            root
+        } else {
+            herdr::split_pane(from, &name, &pane_cwd, direction, murmur_dir)?
+        };
         last_pane = Some(pane.clone());
         println!("pane   {name}  {pane}  ({kind})");
         let _ = herdr::wait_shell(&pane);
@@ -460,14 +465,15 @@ fn brief(
             "You are lead. Plan the work: break it into 2–5 murmur tasks if needed \
              (`murmur task add \"...\" --as {name}`), take {tid} yourself or hand pieces to peers \
              (`murmur send <peer> \"...\" --as {name}`). When a slice is done: \
-             `murmur task done <id> --as {name}`.",
+             `murmur task done <id> --as {name}`. Do not wait for the human; poll \
+             workers and merge when they report green.",
             tid = task.id
         )
     } else {
         format!(
-            "You are a worker. Check mail (`murmur inbox --as {name}`), take work \
+            "You are a worker. First command: `murmur inbox --as {name}`. Then take work \
              (`murmur task take --as {name}`), talk to lead (`murmur send lead \"...\" --as {name}`). \
-             Don't edit files someone else has claimed (`murmur claims`)."
+             Don't edit files someone else has claimed (`murmur claims`). Do not wait for the human."
         )
     };
     let worktree_line = match (lead, worktree) {

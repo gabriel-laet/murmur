@@ -132,9 +132,10 @@ pub fn who(json: bool) -> Result<()> {
         return Ok(());
     }
     let me = store.node_name()?;
+    let herdr_live = crate::herdr::live_names();
     for a in agents {
         let status = if a.node.is_empty() || a.node == me {
-            if store::pid_alive(a.pid) {
+            if store::pid_alive(a.pid) || herdr_live.contains(&a.name) {
                 "up"
             } else {
                 "gone"
@@ -410,6 +411,21 @@ pub fn task_sync(backend: &str) -> Result<()> {
         backend
     );
     crate::beads::sync()
+}
+
+/// One-screen snapshot: who is up, what is on the board.
+pub fn status() -> Result<()> {
+    println!("who");
+    who(false)?;
+    println!("board");
+    task_list(false, false)
+}
+
+/// Deliver a prompt into a live Herdr agent by name.
+pub fn poke(target: &str, text: &str) -> Result<()> {
+    crate::herdr::prompt(target, text)?;
+    println!("prompted {target}");
+    Ok(())
 }
 
 /// Prints the value to stdout. `exec` is the safer path — values in a

@@ -87,6 +87,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Who is up plus the open board, one screen
+    Status,
+    /// Prompt a live Herdr agent by murmur name
+    Poke {
+        /// Agent name (lead, w1, …)
+        target: String,
+        /// Prompt text
+        message: String,
+    },
     /// Register your presence and see who else is here
     Join {
         /// Your agent name (defaults to $MURMUR_AGENT)
@@ -299,6 +308,8 @@ fn run() -> anyhow::Result<()> {
             r#as,
         } => commands::inbox(r#as, wait, timeout, peek, json),
         Command::Who { json } => commands::who(json),
+        Command::Status => commands::status(),
+        Command::Poke { target, message } => commands::poke(&target, &message),
         Command::Join { name } => commands::join(name),
         Command::Leave { r#as } => commands::leave(r#as),
         Command::Claim { path, ttl, r#as } => commands::claim(&path, r#as, ttl),
