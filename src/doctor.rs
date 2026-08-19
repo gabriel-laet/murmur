@@ -43,11 +43,20 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+fn kind_aliases(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "cursor" => &["cursor-agent"],
+        "cursor-agent" => &["cursor"],
+        _ => &[],
+    }
+}
+
 fn check_local(kind: &str, herdr_up: bool) {
     // Best-effort: herdr's kinds name their canonical executable, so a
     // missing binary is a strong hint, not proof — herdr may still know
-    // how to launch it.
-    let bin = on_path(kind);
+    // how to launch it. `cursor` (herdr) vs `cursor-agent` (PATH) is the
+    // one we have seen in the wild.
+    let bin = on_path(kind) || kind_aliases(kind).iter().any(|a| on_path(a));
     match (bin, herdr_up) {
         (true, true) => println!("ok    {kind}"),
         (true, false) => {

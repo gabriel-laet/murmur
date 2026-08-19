@@ -167,7 +167,17 @@ pub fn create_workspace(label: &str, cwd: &Path) -> Result<String> {
         .context("herdr workspace create returned no root pane")
 }
 
+/// Herdr's `--kind` names are not always the executable. `cursor-agent` is
+/// the binary; Herdr wants `cursor`. Cloud kinds never reach this helper.
+pub fn herdr_kind(kind: &str) -> &str {
+    match kind {
+        "cursor-agent" => "cursor",
+        other => other,
+    }
+}
+
 pub fn start_agent(name: &str, kind: &str, pane: &str) -> Result<()> {
+    let kind = herdr_kind(kind);
     call(&[
         "agent",
         "start",
