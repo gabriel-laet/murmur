@@ -8,8 +8,8 @@ use crate::store::{self, ClaimResult, Msg, Store};
 /// Identity: `--as`, then `MURMUR_AGENT`, then the Herdr pane name when
 /// `HERDR_ENV=1`. Explicit beats ambient.
 pub fn identity(explicit: Option<String>) -> Result<String> {
-    let name = ambient(explicit)
-        .context("who are you? pass --as <name> or export MURMUR_AGENT=<name>")?;
+    let name =
+        ambient(explicit).context("who are you? pass --as <name> or export MURMUR_AGENT=<name>")?;
     store::valid_name(&name)?;
     Ok(name)
 }
@@ -51,7 +51,10 @@ pub fn send(
         println!("delivered to {}", recipients.join(", "));
         return Ok(());
     }
-    eprintln!("delivered to {}, waiting for a reply...", recipients.join(", "));
+    eprintln!(
+        "delivered to {}, waiting for a reply...",
+        recipients.join(", ")
+    );
     // Wait in slices so a reply travelling through a peer sync still arrives.
     let deadline = Instant::now() + Duration::from_secs(timeout);
     loop {
@@ -95,7 +98,13 @@ fn print_msgs(msgs: &[Msg], json: bool) {
             println!("{}", serde_json::to_string(msg).unwrap_or_default());
         } else {
             let marker = if msg.re.is_some() { "↩ " } else { "" };
-            println!("[{}] {}: {}{}", store::clock(msg.ts), msg.from, marker, msg.body);
+            println!(
+                "[{}] {}: {}{}",
+                store::clock(msg.ts),
+                msg.from,
+                marker,
+                msg.body
+            );
             if msg.wants_reply {
                 println!(
                     "  ↳ sender is waiting: murmur send {} \"...\" --reply-to {}",
@@ -125,11 +134,19 @@ pub fn who(json: bool) -> Result<()> {
     let me = store.node_name()?;
     for a in agents {
         let status = if a.node.is_empty() || a.node == me {
-            if store::pid_alive(a.pid) { "up" } else { "gone" }
+            if store::pid_alive(a.pid) {
+                "up"
+            } else {
+                "gone"
+            }
         } else {
             "remote"
         };
-        let node = if a.node.is_empty() || a.node == me { "here".to_string() } else { a.node.clone() };
+        let node = if a.node.is_empty() || a.node == me {
+            "here".to_string()
+        } else {
+            a.node.clone()
+        };
         println!(
             "{:<20} {:<7} {:<20} seen {:<6} {}",
             a.name,
@@ -234,7 +251,13 @@ pub fn log(n: usize, json: bool) -> Result<()> {
         if json {
             println!("{}", serde_json::to_string(&msg)?);
         } else {
-            println!("[{}] {} → {}: {}", store::clock(msg.ts), msg.from, msg.to, msg.body);
+            println!(
+                "[{}] {} → {}: {}",
+                store::clock(msg.ts),
+                msg.from,
+                msg.to,
+                msg.body
+            );
         }
     }
     Ok(())
@@ -247,7 +270,8 @@ pub fn watch(all: bool, json: bool) -> Result<()> {
     store.init()?;
     let dir = store.log_dir();
     eprintln!("watching {} (ctrl-c to stop)", dir.display());
-    let mut offsets: std::collections::HashMap<std::path::PathBuf, usize> = std::collections::HashMap::new();
+    let mut offsets: std::collections::HashMap<std::path::PathBuf, usize> =
+        std::collections::HashMap::new();
     loop {
         if dir.is_dir() {
             let mut paths: Vec<_> = std::fs::read_dir(&dir)?
@@ -256,21 +280,35 @@ pub fn watch(all: bool, json: bool) -> Result<()> {
                 .collect();
             paths.sort();
             for path in paths {
-                let Ok(content) = std::fs::read_to_string(&path) else { continue };
-                let seen = *offsets
-                    .entry(path.clone())
-                    .or_insert_with(|| if all { 0 } else { content.lines().count() });
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let seen = *offsets.entry(path.clone()).or_insert_with(|| {
+                    if all {
+                        0
+                    } else {
+                        content.lines().count()
+                    }
+                });
                 let mut count = 0;
                 for (i, line) in content.lines().enumerate() {
                     count = i + 1;
                     if i < seen {
                         continue;
                     }
-                    if let Ok(store::Entry::Msg { msg }) = serde_json::from_str::<store::Entry>(line) {
+                    if let Ok(store::Entry::Msg { msg }) =
+                        serde_json::from_str::<store::Entry>(line)
+                    {
                         if json {
                             println!("{}", serde_json::to_string(&msg).unwrap_or_default());
                         } else {
-                            println!("[{}] {} → {}: {}", store::clock(msg.ts), msg.from, msg.to, msg.body);
+                            println!(
+                                "[{}] {} → {}: {}",
+                                store::clock(msg.ts),
+                                msg.from,
+                                msg.to,
+                                msg.body
+                            );
                         }
                     }
                 }
@@ -291,7 +329,11 @@ pub fn task_add(title: &str, body: Option<String>, name: Option<String>) -> Resu
 
 pub fn task_list(all: bool, json: bool) -> Result<()> {
     let store = Store::locate()?;
-    let states: &[&str] = if all { &crate::tasks::STATES } else { &["todo", "doing"] };
+    let states: &[&str] = if all {
+        &crate::tasks::STATES
+    } else {
+        &["todo", "doing"]
+    };
     let tasks = store.task_list(states)?;
     if json {
         let items: Vec<serde_json::Value> = tasks
@@ -336,7 +378,10 @@ pub fn task_take(name: Option<String>, json: bool) -> Result<()> {
                 if let Some(url) = &task.external_url {
                     println!("  {}", url);
                 }
-                println!("  when finished: murmur task done {} --as {}", task.id, name);
+                println!(
+                    "  when finished: murmur task done {} --as {}",
+                    task.id, name
+                );
             }
             Ok(())
         }
@@ -359,7 +404,11 @@ pub fn task_drop(id: &str, name: Option<String>) -> Result<()> {
 }
 
 pub fn task_sync(backend: &str) -> Result<()> {
-    anyhow::ensure!(backend == "beads", "unknown task backend '{}' (supported: beads)", backend);
+    anyhow::ensure!(
+        backend == "beads",
+        "unknown task backend '{}' (supported: beads)",
+        backend
+    );
     crate::beads::sync()
 }
 
@@ -375,7 +424,10 @@ pub fn secret_resolve(reference: &str) -> Result<()> {
 /// Resolve refs into the child's environment and run it. The values never
 /// touch stdout, the log, or an agent's context.
 pub fn secret_exec(pairs: Vec<String>, command: Vec<String>) -> Result<()> {
-    anyhow::ensure!(!command.is_empty(), "no command given (use: murmur secret exec NAME=<ref> -- <cmd>)");
+    anyhow::ensure!(
+        !command.is_empty(),
+        "no command given (use: murmur secret exec NAME=<ref> -- <cmd>)"
+    );
     let mut cmd = std::process::Command::new(&command[0]);
     cmd.args(&command[1..]);
     for pair in &pairs {
@@ -384,7 +436,9 @@ pub fn secret_exec(pairs: Vec<String>, command: Vec<String>) -> Result<()> {
             .with_context(|| format!("expected NAME=secret://..., got '{}'", pair))?;
         cmd.env(name, crate::secrets::resolve(reference)?);
     }
-    let status = cmd.status().with_context(|| format!("failed to run '{}'", command[0]))?;
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to run '{}'", command[0]))?;
     std::process::exit(status.code().unwrap_or(1));
 }
 

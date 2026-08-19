@@ -27,7 +27,11 @@ pub fn run(all: bool) -> Result<()> {
     let mut present = Vec::new();
     let mut skipped = Vec::new();
     let mut record = |target: &str, changed: bool| {
-        if changed { wired.push(target.to_string()) } else { present.push(target.to_string()) }
+        if changed {
+            wired.push(target.to_string())
+        } else {
+            present.push(target.to_string())
+        }
     };
 
     // Always: Claude Code (the hook is the richest adapter) and AGENTS.md
@@ -47,7 +51,10 @@ pub fn run(all: bool) -> Result<()> {
     }
 
     if all || on_path("herdr") || home_has(".config/herdr") {
-        record("~/.config/murmur/herdr-plugin (Herdr idle-wake)", install_herdr()?);
+        record(
+            "~/.config/murmur/herdr-plugin (Herdr idle-wake)",
+            install_herdr()?,
+        );
     } else {
         skipped.push("herdr");
     }
@@ -64,7 +71,9 @@ pub fn run(all: bool) -> Result<()> {
             skipped.join(", ")
         );
     }
-    println!("\nEvery agent session in this repo now shares one .murmur/ — inboxes, task board, claims.");
+    println!(
+        "\nEvery agent session in this repo now shares one .murmur/ — inboxes, task board, claims."
+    );
     println!("Set MURMUR_AGENT=<name> per session to pick agent names; inside Herdr the pane name is used.");
     println!("Start a herd with: murmur start bd-a1b2 --kind grok  (mixed: --kind claude,codex=2)");
     println!("Route by strength: edit FLEET.md — the lead's brief carries it verbatim.");
@@ -124,9 +133,11 @@ fn install_hooks() -> Result<bool> {
         let entries = entries
             .as_array_mut()
             .with_context(|| format!("hooks.{} is not an array", event))?;
-        let already = entries
-            .iter()
-            .any(|e| serde_json::to_string(e).unwrap_or_default().contains("murmur hook"));
+        let already = entries.iter().any(|e| {
+            serde_json::to_string(e)
+                .unwrap_or_default()
+                .contains("murmur hook")
+        });
         if already {
             continue;
         }
@@ -230,7 +241,11 @@ fn install_opencode() -> Result<bool> {
 fn install_codex() -> Result<bool> {
     let home = home().context("HOME is not set — cannot find ~/.codex/config.toml")?;
     let path = home.join(".codex/config.toml");
-    let existing = if path.exists() { fs::read_to_string(&path)? } else { String::new() };
+    let existing = if path.exists() {
+        fs::read_to_string(&path)?
+    } else {
+        String::new()
+    };
     if existing.contains("[mcp_servers.murmur]") {
         return Ok(false);
     }
@@ -318,7 +333,11 @@ fn link_herdr_plugin(dir: &Path) -> Result<bool> {
 /// section replaceable and the write idempotent.
 fn install_agents_md() -> Result<bool> {
     let path = Path::new("AGENTS.md");
-    let existing = if path.exists() { fs::read_to_string(path)? } else { String::new() };
+    let existing = if path.exists() {
+        fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
     if existing.contains(AGENTS_MD_BEGIN) {
         return Ok(false);
     }
@@ -372,7 +391,9 @@ fn agents_md_section() -> String {
 }
 
 fn on_path(bin: &str) -> bool {
-    let Some(paths) = env::var_os("PATH") else { return false };
+    let Some(paths) = env::var_os("PATH") else {
+        return false;
+    };
     env::split_paths(&paths).any(|p| p.join(bin).is_file())
 }
 
@@ -387,8 +408,12 @@ fn home_has(rel: &str) -> bool {
 fn read_json(path: &Path) -> Result<Value> {
     if path.exists() {
         let content = fs::read_to_string(path)?;
-        serde_json::from_str(&content)
-            .with_context(|| format!("{} contains invalid JSON — fix it and re-run", path.display()))
+        serde_json::from_str(&content).with_context(|| {
+            format!(
+                "{} contains invalid JSON — fix it and re-run",
+                path.display()
+            )
+        })
     } else {
         Ok(json!({}))
     }

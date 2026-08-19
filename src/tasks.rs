@@ -76,7 +76,10 @@ impl Store {
         };
         let tmp = self.root().join("tmp").join(format!("task-{}", task.id));
         fs::write(&tmp, serde_json::to_vec(&task)?)?;
-        fs::rename(&tmp, self.task_dir("todo").join(format!("{}.json", task.id)))?;
+        fs::rename(
+            &tmp,
+            self.task_dir("todo").join(format!("{}.json", task.id)),
+        )?;
         Ok(task)
     }
 
@@ -120,13 +123,17 @@ impl Store {
             .collect();
         paths.sort();
         for path in paths {
-            let Some(file_name) = path.file_name() else { continue };
+            let Some(file_name) = path.file_name() else {
+                continue;
+            };
             let dest = self.task_dir("doing").join(file_name);
             if fs::rename(&path, &dest).is_err() {
                 continue; // lost the race for this one
             }
             let Ok(bytes) = fs::read(&dest) else { continue };
-            let Ok(mut task) = serde_json::from_slice::<Task>(&bytes) else { continue };
+            let Ok(mut task) = serde_json::from_slice::<Task>(&bytes) else {
+                continue;
+            };
             task.taken_by = Some(name.to_string());
             fs::write(&dest, serde_json::to_vec(&task)?)?;
             return Ok(Some(task));
@@ -223,7 +230,11 @@ impl Store {
         }
         let tmp = self.root().join("tmp").join(format!("merge-{}", winner.id));
         fs::write(&tmp, serde_json::to_vec(&winner)?)?;
-        fs::rename(&tmp, self.task_dir(&win_state).join(format!("{}.json", winner.id)))?;
+        fs::rename(
+            &tmp,
+            self.task_dir(&win_state)
+                .join(format!("{}.json", winner.id)),
+        )?;
         Ok(())
     }
 
@@ -239,7 +250,11 @@ impl Store {
         match matches.len() {
             0 => bail!("no {} task matching '{}'", state, id_prefix),
             1 => Ok(matches.into_iter().next().unwrap()),
-            n => bail!("'{}' is ambiguous ({} matches) — use more of the id", id_prefix, n),
+            n => bail!(
+                "'{}' is ambiguous ({} matches) — use more of the id",
+                id_prefix,
+                n
+            ),
         }
     }
 }

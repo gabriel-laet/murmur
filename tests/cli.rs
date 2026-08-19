@@ -120,7 +120,18 @@ fn claim_conflicts_are_denied_and_release_works() {
 #[test]
 fn task_lifecycle() {
     let store = fresh_dir("tasks");
-    let out = murmur(&store, &["task", "add", "write tests", "--body", "unit + integration", "--as", "lead"]);
+    let out = murmur(
+        &store,
+        &[
+            "task",
+            "add",
+            "write tests",
+            "--body",
+            "unit + integration",
+            "--as",
+            "lead",
+        ],
+    );
     assert!(out.status.success(), "{}", stderr(&out));
     murmur(&store, &["task", "add", "update docs", "--as", "lead"]);
 
@@ -174,11 +185,17 @@ fn contested_take_has_exactly_one_winner() {
             let store = store.clone();
             std::thread::spawn(move || {
                 let name = format!("racer{}", i);
-                murmur(&store, &["task", "take", "--as", &name]).status.success()
+                murmur(&store, &["task", "take", "--as", &name])
+                    .status
+                    .success()
             })
         })
         .collect();
-    let wins = handles.into_iter().map(|h| h.join().unwrap()).filter(|w| *w).count();
+    let wins = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .filter(|w| *w)
+        .count();
     assert_eq!(wins, 1, "exactly one racer should win the task");
 }
 
@@ -191,7 +208,16 @@ fn ask_and_reply_flow() {
         std::thread::spawn(move || {
             murmur(
                 &store,
-                &["send", "oracle", "is the schema final?", "--as", "asker", "--reply", "--timeout", "10"],
+                &[
+                    "send",
+                    "oracle",
+                    "is the schema final?",
+                    "--as",
+                    "asker",
+                    "--reply",
+                    "--timeout",
+                    "10",
+                ],
             )
         })
     };
@@ -209,7 +235,18 @@ fn ask_and_reply_flow() {
     let question = question.expect("oracle never received the question");
     assert_eq!(question["wants_reply"], true);
     let id = question["id"].as_str().unwrap();
-    let out = murmur(&store, &["send", "asker", "yes, ship it", "--as", "oracle", "--reply-to", id]);
+    let out = murmur(
+        &store,
+        &[
+            "send",
+            "asker",
+            "yes, ship it",
+            "--as",
+            "oracle",
+            "--reply-to",
+            id,
+        ],
+    );
     assert!(out.status.success());
 
     let out = asker.join().unwrap();
@@ -237,8 +274,13 @@ fn secret_exec_injects_env_without_printing() {
     let store = fresh_dir("secret-exec");
     let out = Command::new(bin())
         .args([
-            "secret", "exec", "INJECTED=secret://env/MURMUR_TEST_SRC",
-            "--", "sh", "-c", "printf %s \"$INJECTED\"",
+            "secret",
+            "exec",
+            "INJECTED=secret://env/MURMUR_TEST_SRC",
+            "--",
+            "sh",
+            "-c",
+            "printf %s \"$INJECTED\"",
         ])
         .env("MURMUR_DIR", &store)
         .env("MURMUR_TEST_SRC", "hunter2")
@@ -252,7 +294,15 @@ fn secret_exec_injects_env_without_printing() {
 fn secret_exec_propagates_exit_codes() {
     let store = fresh_dir("secret-exit");
     let out = Command::new(bin())
-        .args(["secret", "exec", "X=secret://env/MURMUR_TEST_SRC", "--", "sh", "-c", "exit 3"])
+        .args([
+            "secret",
+            "exec",
+            "X=secret://env/MURMUR_TEST_SRC",
+            "--",
+            "sh",
+            "-c",
+            "exit 3",
+        ])
         .env("MURMUR_DIR", &store)
         .env("MURMUR_TEST_SRC", "v")
         .output()
@@ -280,7 +330,13 @@ fn inbox_flags_secret_references_without_resolving() {
     let store = fresh_dir("secret-inbox");
     murmur(
         &store,
-        &["send", "bob", "db creds: secret://infisical/proj/dev/DATABASE_URL", "--as", "alice"],
+        &[
+            "send",
+            "bob",
+            "db creds: secret://infisical/proj/dev/DATABASE_URL",
+            "--as",
+            "alice",
+        ],
     );
     let out = Command::new(bin())
         .args(["inbox", "--as", "bob"])
@@ -289,10 +345,19 @@ fn inbox_flags_secret_references_without_resolving() {
         .output()
         .unwrap();
     let text = stdout(&out);
-    assert!(text.contains("secret://infisical/proj/dev/DATABASE_URL"), "ref itself is delivered");
+    assert!(
+        text.contains("secret://infisical/proj/dev/DATABASE_URL"),
+        "ref itself is delivered"
+    );
     assert!(text.contains("secret reference"), "annotation present");
-    assert!(text.contains("murmur secret exec"), "points at the safe path");
-    assert!(!text.contains("must-not-appear"), "value was never resolved");
+    assert!(
+        text.contains("murmur secret exec"),
+        "points at the safe path"
+    );
+    assert!(
+        !text.contains("must-not-appear"),
+        "value was never resolved"
+    );
 }
 
 fn fake_bd(base: &std::path::Path, log: &std::path::Path) -> PathBuf {
@@ -339,7 +404,10 @@ fn beads_sync_pulls_pushes_and_stays_idempotent() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("pulled 1"));
     let out = sync();
-    assert!(stdout(&out).contains("pulled 0"), "re-sync must not duplicate");
+    assert!(
+        stdout(&out).contains("pulled 0"),
+        "re-sync must not duplicate"
+    );
     let out = murmur(&store, &["task", "list"]);
     assert!(stdout(&out).contains("bd-a1b2"));
     assert!(stdout(&out).contains("Fix login flow"));
@@ -349,8 +417,14 @@ fn beads_sync_pulls_pushes_and_stays_idempotent() {
     let out = sync();
     assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
     let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(calls.contains("update bd-a1b2 --status in_progress"), "{calls}");
-    assert!(calls.contains("--assignee worker-1"), "assignee attributes the agent: {calls}");
+    assert!(
+        calls.contains("update bd-a1b2 --status in_progress"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("--assignee worker-1"),
+        "assignee attributes the agent: {calls}"
+    );
     let out = sync();
     assert!(stdout(&out).contains("pushed 0"), "push is idempotent");
 
@@ -375,9 +449,16 @@ fn peers_auto_sync_converges_mailboxes_without_manual_sync() {
     std::fs::write(a.join("peers"), format!("# my fleet\n{}\n", b.display())).unwrap();
 
     // send from a pushes to the peer immediately — bob reads on b, no sync run
-    murmur(&a, &["send", "bob", "ping across machines", "--as", "alice"]);
+    murmur(
+        &a,
+        &["send", "bob", "ping across machines", "--as", "alice"],
+    );
     let out = murmur(&b, &["inbox", "--as", "bob"]);
-    assert!(stdout(&out).contains("alice: ping across machines"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("alice: ping across machines"),
+        "{}",
+        stdout(&out)
+    );
 
     // bob replies on b, which lists no peers (one-way reachability);
     // alice's next inbox pulls it, because every sync is a two-way exchange
@@ -409,7 +490,11 @@ fn sync_without_target_walks_the_peer_list() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).contains("synced with"), "{}", stdout(&out));
     let out = murmur(&b, &["inbox", "--as", "bob"]);
-    assert!(stdout(&out).contains("queued for the peer"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("queued for the peer"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 #[test]
@@ -437,7 +522,10 @@ fn consumed_messages_never_resurrect() {
     assert!(stdout(&out).contains("read me once"));
     // tombstone flows back to a and kills a's materialized copy
     sync(&a, &b);
-    assert!(stdout(&murmur(&a, &["inbox", "--as", "bob"])).is_empty(), "consumed on b, gone on a");
+    assert!(
+        stdout(&murmur(&a, &["inbox", "--as", "bob"])).is_empty(),
+        "consumed on b, gone on a"
+    );
     // and a third sync doesn't bring it back anywhere
     sync(&a, &b);
     assert!(stdout(&murmur(&a, &["inbox", "--as", "bob"])).is_empty());
@@ -453,7 +541,11 @@ fn sync_relays_through_intermediate_nodes() {
     sync(&a, &b);
     sync(&b, &c); // c never talks to a
     let out = murmur(&c, &["inbox", "--as", "carol"]);
-    assert!(stdout(&out).contains("alice: via b"), "entry relayed a→b→c: {}", stdout(&out));
+    assert!(
+        stdout(&out).contains("alice: via b"),
+        "entry relayed a→b→c: {}",
+        stdout(&out)
+    );
 }
 
 #[test]
@@ -465,7 +557,11 @@ fn sync_merges_presence_and_claims() {
     sync(&a, &b);
     let out = murmur(&b, &["who"]);
     assert!(stdout(&out).contains("alice"));
-    assert!(stdout(&out).contains("remote"), "alice shows as remote on b: {}", stdout(&out));
+    assert!(
+        stdout(&out).contains("remote"),
+        "alice shows as remote on b: {}",
+        stdout(&out)
+    );
     // claim crossed too: bob is denied on b
     let out = murmur(&b, &["claim", "/repo/src/core.rs", "--as", "bob"]);
     assert!(!out.status.success());
@@ -486,13 +582,21 @@ fn contested_task_across_nodes_resolves_deterministically() {
     for store in [&a, &b] {
         let out = murmur(store, &["task", "list", "--json"]);
         let tasks: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-        assert_eq!(tasks[0]["taken_by"], "alpha", "on {}: {}", store.display(), stdout(&out));
+        assert_eq!(
+            tasks[0]["taken_by"],
+            "alpha",
+            "on {}: {}",
+            store.display(),
+            stdout(&out)
+        );
         assert_eq!(tasks[0]["state"], "doing");
     }
     // the loser's done fails visibly; the winner's flows through
     let out = murmur(&a, &["task", "list", "--json"]);
     let id = serde_json::from_str::<serde_json::Value>(&stdout(&out)).unwrap()[0]["id"]
-        .as_str().unwrap().to_string();
+        .as_str()
+        .unwrap()
+        .to_string();
     let out = murmur(&a, &["task", "done", &id, "--as", "zed"]);
     assert!(!out.status.success());
     let out = murmur(&b, &["task", "done", &id, "--as", "alpha"]);
@@ -500,7 +604,12 @@ fn contested_task_across_nodes_resolves_deterministically() {
     sync(&a, &b);
     let out = murmur(&a, &["task", "list", "--all", "--json"]);
     let tasks: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-    assert_eq!(tasks[0]["state"], "done", "completion syncs back: {}", stdout(&out));
+    assert_eq!(
+        tasks[0]["state"],
+        "done",
+        "completion syncs back: {}",
+        stdout(&out)
+    );
 }
 
 #[test]
@@ -558,8 +667,10 @@ fn setup_is_idempotent_and_merges() {
     let out = run(&["setup"]); // second run changes nothing
     assert!(stdout(&out).contains("already present"));
 
-    let settings: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(workdir.join(".claude/settings.json")).unwrap()).unwrap();
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(workdir.join(".claude/settings.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(settings["permissions"]["allow"][0], "Bash(ls:*)");
     let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
     assert_eq!(pre.len(), 2, "existing hook kept, murmur hook appended");
@@ -583,7 +694,10 @@ fn setup_is_idempotent_and_merges() {
     std::fs::write(workdir.join("FLEET.md"), "# mine\n").unwrap();
     let out = run(&["setup"]);
     assert!(out.status.success());
-    assert_eq!(std::fs::read_to_string(workdir.join("FLEET.md")).unwrap(), "# mine\n");
+    assert_eq!(
+        std::fs::read_to_string(workdir.join("FLEET.md")).unwrap(),
+        "# mine\n"
+    );
 }
 
 #[test]
@@ -593,7 +707,11 @@ fn setup_all_wires_every_harness() {
     let home = workdir.join("fake-home");
     std::fs::create_dir_all(&home).unwrap();
     // Pre-existing AGENTS.md and codex config survive and get appended to.
-    std::fs::write(workdir.join("AGENTS.md"), "# My project\n\nBuild with make.\n").unwrap();
+    std::fs::write(
+        workdir.join("AGENTS.md"),
+        "# My project\n\nBuild with make.\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(home.join(".codex")).unwrap();
     std::fs::write(home.join(".codex/config.toml"), "model = \"o4\"\n").unwrap();
     let run = |args: &[&str]| {
@@ -612,7 +730,11 @@ fn setup_all_wires_every_harness() {
     assert!(out2.status.success());
 
     let codex = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
-    assert!(codex.starts_with("model = \"o4\""), "existing config kept: {}", codex);
+    assert!(
+        codex.starts_with("model = \"o4\""),
+        "existing config kept: {}",
+        codex
+    );
     assert_eq!(codex.matches("[mcp_servers.murmur]").count(), 1);
     assert!(codex.contains("MURMUR_HARNESS"));
 
@@ -623,17 +745,30 @@ fn setup_all_wires_every_harness() {
     ] {
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(workdir.join(path)).unwrap()).unwrap();
-        assert!(v[key]["murmur"].is_object(), "{} missing murmur entry", path);
+        assert!(
+            v[key]["murmur"].is_object(),
+            "{} missing murmur entry",
+            path
+        );
     }
 
     let agents = std::fs::read_to_string(workdir.join("AGENTS.md")).unwrap();
-    assert!(agents.starts_with("# My project"), "existing AGENTS.md kept");
+    assert!(
+        agents.starts_with("# My project"),
+        "existing AGENTS.md kept"
+    );
     assert_eq!(agents.matches("murmur:begin").count(), 1);
 
-    let plugin = std::fs::read_to_string(home.join(".config/murmur/herdr-plugin/herdr-plugin.toml")).unwrap();
+    let plugin =
+        std::fs::read_to_string(home.join(".config/murmur/herdr-plugin/herdr-plugin.toml"))
+            .unwrap();
     assert!(plugin.contains("id = \"murmur.herdr\""), "{}", plugin);
     assert!(plugin.contains("pane.agent_status_changed"), "{}", plugin);
-    assert!(plugin.contains("\"herdr\""), "plugin invokes murmur herdr: {}", plugin);
+    assert!(
+        plugin.contains("\"herdr\""),
+        "plugin invokes murmur herdr: {}",
+        plugin
+    );
 }
 
 fn fake_herdr(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
@@ -668,7 +803,11 @@ esac
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("joined as 'backend'"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("joined as 'backend'"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 #[test]
@@ -691,7 +830,11 @@ echo '{"result":{"agent":{"name":"backend","pane_id":"w1:p2"}}}'
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("joined as 'frontend'"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("joined as 'frontend'"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 #[test]
@@ -706,7 +849,11 @@ fn start_no_herdr_puts_goal_on_the_board() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("rewrite claim TTLs"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("rewrite claim TTLs"),
+        "{}",
+        stdout(&out)
+    );
     let list = murmur(&store, &["task", "list"]);
     assert!(stdout(&list).contains("rewrite claim TTLs"));
 }
@@ -749,7 +896,11 @@ fn start_goal_becomes_a_bead_when_beads_is_around() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("bd-9f3c"), "goal got a durable bead id: {}", stdout(&out));
+    assert!(
+        stdout(&out).contains("bd-9f3c"),
+        "goal got a durable bead id: {}",
+        stdout(&out)
+    );
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(calls.contains("create rewrite claim TTLs"), "{calls}");
     let list = murmur(&store, &["task", "list"]);
@@ -813,7 +964,11 @@ esac
     assert!(calls.contains("you are agent 'lead' (claude)"), "{calls}");
     assert!(calls.contains("you are agent 'w1' (codex)"), "{calls}");
     assert!(calls.contains("lead (claude)"), "{calls}");
-    assert!(stdout(&out).contains("lead (claude), w1 (codex), w2 (codex)"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("lead (claude), w1 (codex), w2 (codex)"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 #[test]
@@ -857,7 +1012,10 @@ esac
     assert!(calls.contains("pane split"), "{calls}");
     assert!(calls.contains("agent start"), "{calls}");
     assert!(calls.contains("agent prompt"), "{calls}");
-    assert!(calls.contains("MURMUR_AGENT=lead") || calls.contains("lead"), "{calls}");
+    assert!(
+        calls.contains("MURMUR_AGENT=lead") || calls.contains("lead"),
+        "{calls}"
+    );
     assert!(stdout(&out).contains("herd"), "{}", stdout(&out));
 }
 
@@ -868,11 +1026,25 @@ fn start_worktree_isolates_agents_and_briefs_the_merge_queue() {
     let repo = base.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     let git = |args: &[&str]| {
-        let out = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
         assert!(out.status.success(), "git {:?}: {}", args, stderr(&out));
     };
     git(&["init", "-q"]);
-    git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init", "-q"]);
+    git(&[
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "init",
+        "-q",
+    ]);
 
     let log = base.join("wt-herdr.log");
     let stub = fake_herdr(
@@ -896,7 +1068,15 @@ esac
     let bd = fake_bd(base, &base.join("wt-bd.log"));
 
     let out = Command::new(bin())
-        .args(["start", "bd-a1b2", "--kind", "grok", "--workers", "2", "--worktree"])
+        .args([
+            "start",
+            "bd-a1b2",
+            "--kind",
+            "grok",
+            "--workers",
+            "2",
+            "--worktree",
+        ])
         .current_dir(&repo)
         .env("MURMUR_DIR", &store)
         .env("MURMUR_HERDR", &stub)
@@ -911,7 +1091,11 @@ esac
         let dir = base.join(format!("repo--bd-a1b2-{name}"));
         assert!(dir.join(".git").exists(), "worktree missing for {name}");
     }
-    let branches = Command::new("git").args(["branch", "--list"]).current_dir(&repo).output().unwrap();
+    let branches = Command::new("git")
+        .args(["branch", "--list"])
+        .current_dir(&repo)
+        .output()
+        .unwrap();
     let branches = stdout(&branches);
     assert!(branches.contains("herd/bd-a1b2/lead"), "{branches}");
     assert!(branches.contains("herd/bd-a1b2/w1"), "{branches}");
@@ -921,13 +1105,24 @@ esac
     assert!(calls.contains("repo--bd-a1b2-w1"), "{calls}");
     assert!(calls.contains("MURMUR_DIR="), "{calls}");
     // the briefs carry the discipline: workers isolate, lead owns merges
-    assert!(calls.contains("your own git worktree on branch herd/bd-a1b2/w1"), "{calls}");
+    assert!(
+        calls.contains("your own git worktree on branch herd/bd-a1b2/w1"),
+        "{calls}"
+    );
     assert!(calls.contains("merge queue"), "{calls}");
     assert!(calls.contains("integration branch"), "{calls}");
 
     // re-running reuses the worktrees instead of erroring
     let out = Command::new(bin())
-        .args(["start", "bd-a1b2", "--kind", "grok", "--workers", "2", "--worktree"])
+        .args([
+            "start",
+            "bd-a1b2",
+            "--kind",
+            "grok",
+            "--workers",
+            "2",
+            "--worktree",
+        ])
         .current_dir(&repo)
         .env("MURMUR_DIR", &store)
         .env("MURMUR_HERDR", &stub)
@@ -978,7 +1173,10 @@ esac
     assert!(out.status.success(), "{}", stderr(&out));
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(calls.contains("agent prompt"), "{calls}");
-    assert!(calls.contains("please review") || calls.contains("unread"), "{calls}");
+    assert!(
+        calls.contains("please review") || calls.contains("unread"),
+        "{calls}"
+    );
     let before = calls.matches("agent prompt").count();
     let out = run();
     assert!(out.status.success(), "{}", stderr(&out));
@@ -1030,7 +1228,10 @@ esac
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(calls.contains("agent prompt"), "{calls}");
     assert!(calls.contains("bd-a1b2"), "names the ready bead: {calls}");
-    assert!(calls.contains("task sync beads"), "points at the pull path: {calls}");
+    assert!(
+        calls.contains("task sync beads"),
+        "points at the pull path: {calls}"
+    );
     // same ready set → no re-prompt
     let before = calls.matches("agent prompt").count();
     let out = run();
@@ -1068,8 +1269,17 @@ esac
 
 fn git_repo_with_origin(dir: &std::path::Path) {
     let run = |args: &[&str]| {
-        let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
-        assert!(out.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     run(&["init", "-q"]);
     run(&["remote", "add", "origin", "git@github.com:acme/demo.git"]);
@@ -1100,10 +1310,22 @@ fn start_all_cloud_launches_workers_via_curl() {
     assert!(s.contains("integration point"), "{s}");
     let calls = std::fs::read_to_string(&log).unwrap();
     assert_eq!(calls.matches("-X POST").count(), 2, "{calls}");
-    assert!(calls.contains("https://api.cursor.com/v1/agents"), "{calls}");
-    assert!(calls.contains("https://github.com/acme/demo"), "ssh remote normalized: {calls}");
-    assert!(calls.contains("ship dark mode"), "brief rides the prompt: {calls}");
-    assert!(!calls.contains("test-key"), "the API key must never be an argv: {calls}");
+    assert!(
+        calls.contains("https://api.cursor.com/v1/agents"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("https://github.com/acme/demo"),
+        "ssh remote normalized: {calls}"
+    );
+    assert!(
+        calls.contains("ship dark mode"),
+        "brief rides the prompt: {calls}"
+    );
+    assert!(
+        !calls.contains("test-key"),
+        "the API key must never be an argv: {calls}"
+    );
 }
 
 #[test]
@@ -1188,8 +1410,14 @@ fn cloud_status_and_prompt_hit_the_provider_endpoints() {
     let out = run(&["cloud", "prompt", "bc-42", "keep going"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(calls.contains("-X GET https://api.cursor.com/v1/agents/bc-42"), "{calls}");
-    assert!(calls.contains("-X POST https://api.cursor.com/v1/agents/bc-42/runs"), "{calls}");
+    assert!(
+        calls.contains("-X GET https://api.cursor.com/v1/agents/bc-42"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("-X POST https://api.cursor.com/v1/agents/bc-42/runs"),
+        "{calls}"
+    );
     assert!(calls.contains("keep going"), "{calls}");
 }
 
@@ -1258,5 +1486,8 @@ fn doctor_reads_cursor_key_from_dot_secrets() {
     assert!(out.status.success(), "{}", stderr(&out));
     let s = stdout(&out);
     assert!(s.contains("ok    cloud:cursor"), "{s}");
-    assert!(!s.contains("from-file"), "the API key must never be printed: {s}");
+    assert!(
+        !s.contains("from-file"),
+        "the API key must never be printed: {s}"
+    );
 }

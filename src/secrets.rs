@@ -14,9 +14,12 @@ pub fn contains_ref(text: &str) -> bool {
 }
 
 pub fn resolve(reference: &str) -> Result<String> {
-    let rest = reference
-        .strip_prefix("secret://")
-        .with_context(|| format!("not a secret reference (expected secret://...): {}", reference))?;
+    let rest = reference.strip_prefix("secret://").with_context(|| {
+        format!(
+            "not a secret reference (expected secret://...): {}",
+            reference
+        )
+    })?;
     let (backend, locator) = rest
         .split_once('/')
         .context("malformed secret reference: expected secret://<backend>/<locator>")?;
@@ -123,6 +126,9 @@ mod tests {
     #[test]
     fn env_backend_resolves() {
         std::env::set_var("MURMUR_UNIT_TEST_SECRET", "s3cr3t");
-        assert_eq!(resolve("secret://env/MURMUR_UNIT_TEST_SECRET").unwrap(), "s3cr3t");
+        assert_eq!(
+            resolve("secret://env/MURMUR_UNIT_TEST_SECRET").unwrap(),
+            "s3cr3t"
+        );
     }
 }

@@ -283,12 +283,21 @@ fn main() {
 fn run() -> anyhow::Result<()> {
     cloud::load_cursor_key();
     match Cli::parse().command {
-        Command::Send { to, message, r#as, reply, reply_to, timeout } => {
-            commands::send(&to, message, r#as, reply_to, reply, timeout)
-        }
-        Command::Inbox { wait, timeout, peek, json, r#as } => {
-            commands::inbox(r#as, wait, timeout, peek, json)
-        }
+        Command::Send {
+            to,
+            message,
+            r#as,
+            reply,
+            reply_to,
+            timeout,
+        } => commands::send(&to, message, r#as, reply_to, reply, timeout),
+        Command::Inbox {
+            wait,
+            timeout,
+            peek,
+            json,
+            r#as,
+        } => commands::inbox(r#as, wait, timeout, peek, json),
         Command::Who { json } => commands::who(json),
         Command::Join { name } => commands::join(name),
         Command::Leave { r#as } => commands::leave(r#as),
@@ -320,9 +329,21 @@ fn run() -> anyhow::Result<()> {
             SecretCmd::Exec { pairs, command } => commands::secret_exec(pairs, command),
         },
         Command::Setup { all } => setup::run(all),
-        Command::Start { goal, bead, workers, kind, no_herdr, worktree } => {
-            start::run(start::Opts { goal, bead, workers, kind, no_herdr, worktree })
-        }
+        Command::Start {
+            goal,
+            bead,
+            workers,
+            kind,
+            no_herdr,
+            worktree,
+        } => start::run(start::Opts {
+            goal,
+            bead,
+            workers,
+            kind,
+            no_herdr,
+            worktree,
+        }),
         Command::Doctor => doctor::run(),
         Command::Cloud { cmd } => match cmd {
             CloudCmd::Status { id } => cloud::status(&id),

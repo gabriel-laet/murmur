@@ -103,7 +103,9 @@ impl Store {
     /// else `.murmur` in cwd (created lazily on first write).
     pub fn locate() -> Result<Store> {
         if let Ok(dir) = std::env::var("MURMUR_DIR") {
-            return Ok(Store { root: PathBuf::from(dir) });
+            return Ok(Store {
+                root: PathBuf::from(dir),
+            });
         }
         let cwd = std::env::current_dir().context("cannot determine cwd")?;
         Ok(Store::locate_in(&cwd))
@@ -119,7 +121,11 @@ impl Store {
             }
             match dir.parent() {
                 Some(parent) => dir = parent,
-                None => return Store { root: start.join(".murmur") },
+                None => {
+                    return Store {
+                        root: start.join(".murmur"),
+                    }
+                }
             }
         }
     }
@@ -163,7 +169,9 @@ impl Store {
                 .filter(|n| n != from)
                 .collect();
             if peers.is_empty() {
-                bail!("broadcast has no recipients: no other agents have joined (see `murmur who`)");
+                bail!(
+                    "broadcast has no recipients: no other agents have joined (see `murmur who`)"
+                );
             }
             peers
         } else {
@@ -261,7 +269,11 @@ impl Store {
             for msg in &msgs {
                 self.append_entry(
                     &node,
-                    &Entry::Tomb { id: msg.id.clone(), to: name.to_string(), ts: now_millis() },
+                    &Entry::Tomb {
+                        id: msg.id.clone(),
+                        to: name.to_string(),
+                        ts: now_millis(),
+                    },
                 )?;
             }
         }
@@ -295,11 +307,26 @@ impl Store {
             .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
             .take(24)
             .collect();
-        let host = if host.is_empty() { "node".to_string() } else { host };
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos();
-        let name = format!("{}-{}{:04x}", host, std::process::id() % 10000, nanos & 0xffff);
+        let host = if host.is_empty() {
+            "node".to_string()
+        } else {
+            host
+        };
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let name = format!(
+            "{}-{}{:04x}",
+            host,
+            std::process::id() % 10000,
+            nanos & 0xffff
+        );
         let tmp = self.root.join("tmp").join(format!("node-{}", name));
-        fs::write(&tmp, serde_json::to_vec(&serde_json::json!({ "name": name, "created": now_secs() }))?)?;
+        fs::write(
+            &tmp,
+            serde_json::to_vec(&serde_json::json!({ "name": name, "created": now_secs() }))?,
+        )?;
         fs::rename(&tmp, &path)?;
         Ok(name)
     }
@@ -328,8 +355,12 @@ impl Store {
         }
         for entry in fs::read_dir(self.log_dir())?.filter_map(|e| e.ok()) {
             let path = entry.path();
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-            let count = fs::read_to_string(&path).map(|c| c.lines().count()).unwrap_or(0);
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let count = fs::read_to_string(&path)
+                .map(|c| c.lines().count())
+                .unwrap_or(0);
             vector.insert(stem.to_string(), count as u64);
         }
         Ok(vector)
@@ -403,7 +434,10 @@ impl Store {
                 let _ = fs::remove_file(&path);
             } else if !path.exists() {
                 fs::create_dir_all(&inbox)?;
-                let tmp = self.root.join("tmp").join(format!("mat-{}-{}", msg.to, msg.id));
+                let tmp = self
+                    .root
+                    .join("tmp")
+                    .join(format!("mat-{}-{}", msg.to, msg.id));
                 fs::write(&tmp, serde_json::to_vec(&msg)?)?;
                 fs::rename(&tmp, &path)?;
             }
@@ -416,16 +450,25 @@ impl Store {
     /// Last-writer-wins by `last_seen`.
     pub fn merge_agent(&self, incoming: Agent) -> Result<()> {
         self.init()?;
-        let path = self.root.join("agents").join(format!("{}.json", incoming.name));
+        let path = self
+            .root
+            .join("agents")
+            .join(format!("{}.json", incoming.name));
         if valid_name(&incoming.name).is_err() {
             return Ok(());
         }
-        if let Some(existing) = fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Agent>(&b).ok()) {
+        if let Some(existing) = fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Agent>(&b).ok())
+        {
             if existing.last_seen >= incoming.last_seen {
                 return Ok(());
             }
         }
-        let tmp = self.root.join("tmp").join(format!("agent-{}-{}", incoming.name, now_millis()));
+        let tmp = self
+            .root
+            .join("tmp")
+            .join(format!("agent-{}-{}", incoming.name, now_millis()));
         fs::write(&tmp, serde_json::to_vec(&incoming)?)?;
         fs::rename(&tmp, &path)?;
         Ok(())
@@ -443,7 +486,10 @@ impl Store {
                 return Ok(());
             }
         }
-        let tmp = self.root.join("tmp").join(format!("claim-m-{}", now_millis()));
+        let tmp = self
+            .root
+            .join("tmp")
+            .join(format!("claim-m-{}", now_millis()));
         fs::write(&tmp, serde_json::to_vec(&incoming)?)?;
         fs::rename(&tmp, &file)?;
         Ok(())
@@ -520,7 +566,10 @@ impl Store {
             ts: now_secs(),
             ttl_secs,
         };
-        let tmp = self.root.join("tmp").join(format!("claim-{}-{}", holder, now_millis()));
+        let tmp = self
+            .root
+            .join("tmp")
+            .join(format!("claim-{}-{}", holder, now_millis()));
         fs::write(&tmp, serde_json::to_vec(&claim)?)?;
         fs::rename(&tmp, &file)?;
         Ok(ClaimResult::Granted)
@@ -554,7 +603,9 @@ impl Store {
     }
 
     fn claim_file(&self, canonical: &str) -> PathBuf {
-        self.root.join("claims").join(format!("{}.json", encode(canonical)))
+        self.root
+            .join("claims")
+            .join(format!("{}.json", encode(canonical)))
     }
 
     // ---- housekeeping ----
@@ -590,17 +641,24 @@ impl Store {
 }
 
 fn read_claim(path: &Path) -> Option<Claim> {
-    fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok())
+    fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
 }
 
 /// Agent names become directory names, so keep them boring.
 pub fn valid_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name.len() <= 64
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         && !name.starts_with('.');
     if !ok {
-        bail!("invalid agent name '{}': use letters, digits, '-', '_', '.'", name);
+        bail!(
+            "invalid agent name '{}': use letters, digits, '-', '_', '.'",
+            name
+        );
     }
     Ok(())
 }

@@ -14,7 +14,11 @@ pub fn run() -> Result<()> {
     let name = crate::commands::ambient(None).unwrap_or_else(|| {
         let harness = std::env::var("MURMUR_HARNESS")
             .ok()
-            .map(|h| h.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect::<String>())
+            .map(|h| {
+                h.chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect::<String>()
+            })
             .filter(|h| !h.is_empty())
             .unwrap_or_else(|| "agent".into());
         format!("{}-{}", harness, std::process::id())
@@ -31,7 +35,10 @@ pub fn run() -> Result<()> {
         let req: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(e) => {
-                write_response(&mut stdout, &error_response(Value::Null, -32700, &format!("parse error: {}", e)))?;
+                write_response(
+                    &mut stdout,
+                    &error_response(Value::Null, -32700, &format!("parse error: {}", e)),
+                )?;
                 continue;
             }
         };
@@ -53,11 +60,14 @@ fn handle(id: Value, method: &str, params: &Value, name: &str) -> Value {
                 .get("protocolVersion")
                 .and_then(|v| v.as_str())
                 .unwrap_or("2024-11-05");
-            result_response(id, json!({
-                "protocolVersion": version,
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": "murmur", "version": env!("CARGO_PKG_VERSION") }
-            }))
+            result_response(
+                id,
+                json!({
+                    "protocolVersion": version,
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "murmur", "version": env!("CARGO_PKG_VERSION") }
+                }),
+            )
         }
         "ping" => result_response(id, json!({})),
         "tools/list" => result_response(id, json!({ "tools": tool_definitions() })),
@@ -65,13 +75,19 @@ fn handle(id: Value, method: &str, params: &Value, name: &str) -> Value {
             let tool = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             match call_tool(tool, &args, name) {
-                Ok(text) => result_response(id, json!({
-                    "content": [{ "type": "text", "text": text }]
-                })),
-                Err(e) => result_response(id, json!({
-                    "content": [{ "type": "text", "text": e.to_string() }],
-                    "isError": true
-                })),
+                Ok(text) => result_response(
+                    id,
+                    json!({
+                        "content": [{ "type": "text", "text": text }]
+                    }),
+                ),
+                Err(e) => result_response(
+                    id,
+                    json!({
+                        "content": [{ "type": "text", "text": e.to_string() }],
+                        "isError": true
+                    }),
+                ),
             }
         }
         _ => error_response(id, -32601, "method not found"),
@@ -80,21 +96,33 @@ fn handle(id: Value, method: &str, params: &Value, name: &str) -> Value {
 
 fn call_tool(tool: &str, args: &Value, name: &str) -> Result<String> {
     let store = Store::locate()?;
-    let str_arg = |key: &str| args.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let str_arg = |key: &str| {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
 
     match tool {
         "send_message" => {
             let reply_to = args.get("reply_to").and_then(|v| v.as_str());
             let (recipients, id) =
                 store.send(name, &str_arg("to"), &str_arg("message"), reply_to, false)?;
-            Ok(format!("delivered to {} (id {})", recipients.join(", "), id))
+            Ok(format!(
+                "delivered to {} (id {})",
+                recipients.join(", "),
+                id
+            ))
         }
         "broadcast" => {
             let (recipients, _) = store.send(name, "*", &str_arg("message"), None, false)?;
             Ok(format!("delivered to {}", recipients.join(", ")))
         }
         "ask" => {
-            let timeout = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(60);
+            let timeout = args
+                .get("timeout_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(60);
             let (_, id) = store.send(name, &str_arg("to"), &str_arg("message"), None, true)?;
             match store.await_reply(name, &id, std::time::Duration::from_secs(timeout))? {
                 Some(reply) => Ok(reply.body),
@@ -138,7 +166,11 @@ fn call_tool(tool: &str, args: &Value, name: &str) -> Result<String> {
                 "took task {}: {}{}\nmark it finished with complete_task when done",
                 task.id,
                 task.title,
-                if task.body.is_empty() { String::new() } else { format!("\n{}", task.body) }
+                if task.body.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n{}", task.body)
+                }
             )),
             None => Ok("no open tasks".into()),
         },
@@ -154,7 +186,11 @@ fn call_tool(tool: &str, args: &Value, name: &str) -> Result<String> {
                 Ok(tasks
                     .iter()
                     .map(|(state, t)| {
-                        let who = t.taken_by.as_deref().map(|w| format!(" (taken by {})", w)).unwrap_or_default();
+                        let who = t
+                            .taken_by
+                            .as_deref()
+                            .map(|w| format!(" (taken by {})", w))
+                            .unwrap_or_default();
                         format!("{} {} {}{}", state, t.id, t.title, who)
                     })
                     .collect::<Vec<_>>()
@@ -169,8 +205,18 @@ fn call_tool(tool: &str, args: &Value, name: &str) -> Result<String> {
                 Ok(agents
                     .iter()
                     .map(|a| {
-                        let status = if store::pid_alive(a.pid) { "up" } else { "gone" };
-                        format!("{} ({}, seen {} ago, cwd {})", a.name, status, store::ago(a.last_seen), a.cwd)
+                        let status = if store::pid_alive(a.pid) {
+                            "up"
+                        } else {
+                            "gone"
+                        };
+                        format!(
+                            "{} ({}, seen {} ago, cwd {})",
+                            a.name,
+                            status,
+                            store::ago(a.last_seen),
+                            a.cwd
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join("\n"))
@@ -182,7 +228,9 @@ fn call_tool(tool: &str, args: &Value, name: &str) -> Result<String> {
                 ClaimResult::Granted => Ok(format!("claimed {}", path)),
                 ClaimResult::Held(c) => Ok(format!(
                     "denied: {} is claimed by {} ({} ago)",
-                    c.path, c.holder, store::ago(c.ts)
+                    c.path,
+                    c.holder,
+                    store::ago(c.ts)
                 )),
             }
         }

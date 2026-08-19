@@ -38,8 +38,12 @@ pub fn run() -> anyhow::Result<()> {
     std::io::stdin().read_to_string(&mut input)?;
     let hook: HookInput = serde_json::from_str(&input).unwrap_or_default();
 
-    let Some(event) = hook.hook_event_name.clone() else { exit(0) };
-    let Some(name) = agent_name(&hook) else { exit(0) };
+    let Some(event) = hook.hook_event_name.clone() else {
+        exit(0)
+    };
+    let Some(name) = agent_name(&hook) else {
+        exit(0)
+    };
     let Ok(store) = Store::locate() else { exit(0) };
 
     // Mail-reading events pull from peers first (debounced, best-effort),
@@ -68,7 +72,11 @@ fn agent_name(hook: &HookInput) -> Option<String> {
         return Some(name);
     }
     let session = hook.session_id.as_deref()?;
-    let short: String = session.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
+    let short: String = session
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
     if short.is_empty() {
         None
     } else {
@@ -171,7 +179,10 @@ fn stop(store: &Store, name: &str) {
     if let Some(text) = format_messages(&messages) {
         let open_tasks = store.open_task_count();
         let tasks_note = if open_tasks > 0 {
-            format!("\n(Also: {} open task(s) on the board — `murmur task list`.)", open_tasks)
+            format!(
+                "\n(Also: {} open task(s) on the board — `murmur task list`.)",
+                open_tasks
+            )
         } else {
             String::new()
         };

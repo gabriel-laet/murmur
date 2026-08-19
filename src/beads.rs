@@ -68,7 +68,9 @@ fn beads_root(cwd: &Path) -> Option<PathBuf> {
 }
 
 fn on_path(bin: &str) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else { return false };
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
     std::env::split_paths(&paths).any(|p| p.join(bin).is_file())
 }
 
@@ -126,7 +128,9 @@ pub fn sync() -> Result<()> {
 
     let mut pushed = 0;
     for (state, mut task) in store.task_list(&STATES)? {
-        let Some(bead_id) = task.external_id.clone() else { continue };
+        let Some(bead_id) = task.external_id.clone() else {
+            continue;
+        };
         let Some(target) = transition(&state, task.synced_state.as_deref()) else {
             continue;
         };
@@ -152,7 +156,10 @@ pub fn sync() -> Result<()> {
         pushed += 1;
     }
 
-    println!("beads: pulled {} ready bead(s), pushed {} transition(s)", pulled, pushed);
+    println!(
+        "beads: pulled {} ready bead(s), pushed {} transition(s)",
+        pulled, pushed
+    );
     Ok(())
 }
 
@@ -208,7 +215,10 @@ fn first_issue(v: &Value) -> Option<Issue> {
 }
 
 fn parse_issue(v: &Value) -> Option<Issue> {
-    let id = v.get("id").and_then(|x| x.as_str()).filter(|s| !s.is_empty())?;
+    let id = v
+        .get("id")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())?;
     let title = v.get("title").and_then(|x| x.as_str()).unwrap_or_default();
     let body = v
         .get("description")
@@ -239,7 +249,11 @@ fn call_in(cwd: Option<&Path>, args: &[&str]) -> Result<Value> {
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let out_s = String::from_utf8_lossy(&out.stdout);
-        let detail = if err.trim().is_empty() { out_s.trim() } else { err.trim() };
+        let detail = if err.trim().is_empty() {
+            out_s.trim()
+        } else {
+            err.trim()
+        };
         bail!("bd {} failed: {}", args.join(" "), detail);
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -285,6 +299,9 @@ mod tests {
         let list = issue_list(&wrapped);
         assert_eq!(list[0].id, "bd-3");
         assert_eq!(list[0].body, "b");
-        assert!(issue_list(&json!({"count": 0})).is_empty(), "no id, no issue");
+        assert!(
+            issue_list(&json!({"count": 0})).is_empty(),
+            "no id, no issue"
+        );
     }
 }

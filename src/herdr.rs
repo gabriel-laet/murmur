@@ -8,12 +8,12 @@
 //! The kernel never talks to Herdr's socket. We shell out to the `herdr`
 //! CLI the same way beads shells out to `bd`.
 
+use crate::store::{self, Store};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use crate::store::{self, Store};
 
 pub fn bin() -> PathBuf {
     if let Ok(p) = std::env::var("MURMUR_HERDR") {
@@ -53,7 +53,9 @@ pub fn agent_name() -> Option<String> {
     if !inside() {
         return None;
     }
-    let pane = std::env::var("HERDR_PANE_ID").ok().filter(|s| !s.is_empty());
+    let pane = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
     let info = pane
         .as_deref()
         .and_then(|id| call(&["agent", "get", id]).ok())
@@ -186,7 +188,15 @@ pub fn prompt(target: &str, text: &str) -> Result<()> {
 }
 
 pub fn notify(title: &str, body: &str) -> Result<()> {
-    let _ = call(&["notification", "show", title, "--body", body, "--sound", "request"]);
+    let _ = call(&[
+        "notification",
+        "show",
+        title,
+        "--body",
+        body,
+        "--sound",
+        "request",
+    ]);
     Ok(())
 }
 
@@ -246,9 +256,9 @@ fn run_inner() -> Result<()> {
         .or_else(|| info.pointer("/result/pane"))
         .cloned()
         .unwrap_or(json!({}));
-    let name = str_field(&node, "name").or_else(agent_name).unwrap_or_else(|| {
-        format!("herdr-{}", pane.replace(':', "-"))
-    });
+    let name = str_field(&node, "name")
+        .or_else(agent_name)
+        .unwrap_or_else(|| format!("herdr-{}", pane.replace(':', "-")));
     let cwd = str_field(&node, "cwd")
         .or_else(|| str_field(&node, "foreground_cwd"))
         .map(PathBuf::from)
@@ -322,7 +332,9 @@ fn nudge_ready_beads(name: &str, cwd: Option<&Path>, state_dir: &Path) {
     if !crate::beads::available_in(cwd) {
         return;
     }
-    let Ok(ready) = crate::beads::ready_in(Some(cwd)) else { return };
+    let Ok(ready) = crate::beads::ready_in(Some(cwd)) else {
+        return;
+    };
     if ready.is_empty() {
         return;
     }
@@ -370,7 +382,11 @@ pub fn call(args: &[&str]) -> Result<Value> {
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let out_s = String::from_utf8_lossy(&out.stdout);
-        let detail = if err.trim().is_empty() { out_s.trim() } else { err.trim() };
+        let detail = if err.trim().is_empty() {
+            out_s.trim()
+        } else {
+            err.trim()
+        };
         bail!("herdr {} failed: {}", args.join(" "), detail);
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -378,7 +394,8 @@ pub fn call(args: &[&str]) -> Result<Value> {
     if trimmed.is_empty() {
         return Ok(json!({}));
     }
-    serde_json::from_str(trimmed).with_context(|| format!("herdr {} returned non-JSON", args.join(" ")))
+    serde_json::from_str(trimmed)
+        .with_context(|| format!("herdr {} returned non-JSON", args.join(" ")))
 }
 
 fn pane_id_from(v: &Value) -> Option<String> {

@@ -18,7 +18,8 @@ use std::path::PathBuf;
 pub const FILE: &str = "FLEET.md";
 
 /// Long rosters shouldn't eat the brief; this is a prompt, not a wiki.
-const BRIEF_CAP: usize = 2000;
+/// 8KiB still leaves room for a kind table plus a short routing note.
+const BRIEF_CAP: usize = 8192;
 
 const TEMPLATE: &str = "\
 # Fleet roster
@@ -66,32 +67,71 @@ pub fn for_brief() -> Option<String> {
 /// The kind column of the roster table, best-effort — `murmur doctor`'s
 /// lint input, never a routing input.
 pub fn kinds() -> Vec<String> {
-    let Some(path) = find() else { return Vec::new() };
-    let Ok(text) = fs::read_to_string(path) else { return Vec::new() };
+    let Some(path) = find() else {
+        return Vec::new();
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
     kinds_in(&text)
+}
+
+fn first_cell(line: &str) -> String {
+    line.trim()
+        .trim_matches('|')
+        .split('|')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn is_separator_cell(cell: &str) -> bool {
+    !cell.is_empty() && cell.chars().all(|c| c == '-' || c == ' ' || c == ':')
+}
+
+/// Harness / cloud kind tokens: `claude`, `cursor-agent`, `cloud:cursor`.
+fn looks_like_kind(cell: &str) -> bool {
+    let mut parts = cell.split(':');
+    let Some(head) = parts.next() else {
+        return false;
+    };
+    let tail = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
+    fn token(s: &str) -> bool {
+        let mut chars = s.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() => {
+                chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            }
+            _ => false,
+        }
+    }
+    token(head) && tail.map(token).unwrap_or(true)
 }
 
 fn kinds_in(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let mut in_kind_table = false;
     for line in text.lines() {
         let line = line.trim();
         if !line.starts_with('|') {
+            in_kind_table = false;
             continue;
         }
-        let cell = line
-            .trim_matches('|')
-            .split('|')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if cell.is_empty()
-            || cell.eq_ignore_ascii_case("kind")
-            || cell.chars().all(|c| c == '-' || c == ' ' || c == ':')
-        {
+        let cell = first_cell(line);
+        if is_separator_cell(&cell) {
             continue;
         }
-        if !out.contains(&cell) {
+        if !in_kind_table {
+            // Only the roster table (header cell `kind`) is kinds. A later
+            // "| bead | owner |" table is routing prose, not a harness list.
+            in_kind_table = cell.eq_ignore_ascii_case("kind");
+            continue;
+        }
+        if looks_like_kind(&cell) && !out.contains(&cell) {
             out.push(cell);
         }
     }
@@ -132,5 +172,26 @@ mod tests {
     fn header_separator_and_duplicates_are_skipped() {
         let text = "| kind | x |\n| --- | --- |\n| claude | a |\n| claude | b |\nprose\n";
         assert_eq!(kinds_in(text), vec!["claude"]);
+    }
+
+    #[test]
+    fn later_markdown_tables_are_not_kinds() {
+        let text = "\
+| kind | strong at |\n\
+| --- | --- |\n\
+| claude | architecture |\n\
+| cursor-agent | worktrees |\n\
+\n\
+| bead | kind |\n\
+| --- | --- |\n\
+| pal-nq9.2 | codex |\n\
+| pal-blm.4 | grok |\n";
+        assert_eq!(kinds_in(text), vec!["claude", "cursor-agent"]);
+    }
+
+    #[test]
+    fn cloud_kinds_parse_and_bead_ids_do_not() {
+        let text = "| kind |\n| --- |\n| cloud:cursor |\n| not a kind |\n| pal-nq9.2 |\n";
+        assert_eq!(kinds_in(text), vec!["cloud:cursor"]);
     }
 }

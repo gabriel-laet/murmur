@@ -50,16 +50,26 @@ fn parse_target(target: &str) -> Target {
     if let Some((host, path)) = target.split_once(':') {
         return Target::Ssh {
             host: host.to_string(),
-            path: if path.is_empty() { None } else { Some(path.to_string()) },
+            path: if path.is_empty() {
+                None
+            } else {
+                Some(path.to_string())
+            },
         };
     }
     if target.contains('/') || Path::new(target).exists() {
         Target::Local(PathBuf::from(target))
     } else if target.contains('@') {
-        Target::Ssh { host: target.to_string(), path: None }
+        Target::Ssh {
+            host: target.to_string(),
+            path: None,
+        }
     } else {
         // a bare word that isn't a path here: treat as an ssh host
-        Target::Ssh { host: target.to_string(), path: None }
+        Target::Ssh {
+            host: target.to_string(),
+            path: None,
+        }
     }
 }
 
@@ -76,7 +86,10 @@ pub fn run(target: &str) -> Result<()> {
     let local = Store::locate()?;
     local.init()?;
     let (label, sent, received) = sync_once(&local, target, false)?;
-    println!("synced with {}: sent {} entries, received {}", label, sent, received);
+    println!(
+        "synced with {}: sent {} entries, received {}",
+        label, sent, received
+    );
     Ok(())
 }
 
@@ -95,7 +108,10 @@ pub fn run_peers() -> Result<()> {
     for peer in &peers {
         match sync_once(&local, peer, false) {
             Ok((label, sent, received)) => {
-                println!("synced with {}: sent {} entries, received {}", label, sent, received)
+                println!(
+                    "synced with {}: sent {} entries, received {}",
+                    label, sent, received
+                )
             }
             Err(e) => eprintln!("murmur: sync {}: {}", peer, e),
         }
@@ -132,14 +148,20 @@ fn sync_once(local: &Store, target: &str, batch_mode: bool) -> Result<(String, u
             let mut w = child.stdin.take().unwrap();
             let mut r = BufReader::new(child.stdout.take().unwrap());
 
-            send_json(&mut w, &Hello { node: local.node_name()?, vector: local.log_vector()? })?;
-            let their_hello: Hello = recv_json(&mut r).context(
-                "no hello from the remote end — is murmur installed there and on PATH?",
+            send_json(
+                &mut w,
+                &Hello {
+                    node: local.node_name()?,
+                    vector: local.log_vector()?,
+                },
             )?;
+            let their_hello: Hello = recv_json(&mut r)
+                .context("no hello from the remote end — is murmur installed there and on PATH?")?;
             let batch = make_batch(local, &their_hello.vector)?;
             let sent: usize = batch.logs.values().map(|s| s.entries.len()).sum();
             send_json(&mut w, &batch)?;
-            let their_batch: Batch = recv_json(&mut r).context("remote closed before sending its batch")?;
+            let their_batch: Batch =
+                recv_json(&mut r).context("remote closed before sending its batch")?;
             let received: usize = their_batch.logs.values().map(|s| s.entries.len()).sum();
             apply_batch(local, their_batch)?;
             drop(w);
@@ -169,7 +191,11 @@ pub fn peers(store: &Store) -> Vec<String> {
         );
     }
     if let Ok(env) = std::env::var("MURMUR_SYNC_PEERS") {
-        out.extend(env.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        out.extend(
+            env.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
     }
     out.dedup();
     out
@@ -211,9 +237,16 @@ fn stamp_path(store: &Store) -> PathBuf {
 }
 
 fn stamp_expired(store: &Store) -> bool {
-    let Ok(meta) = std::fs::metadata(stamp_path(store)) else { return true };
-    let Ok(mtime) = meta.modified() else { return true };
-    mtime.elapsed().map(|age| age >= auto_interval()).unwrap_or(true)
+    let Ok(meta) = std::fs::metadata(stamp_path(store)) else {
+        return true;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return true;
+    };
+    mtime
+        .elapsed()
+        .map(|age| age >= auto_interval())
+        .unwrap_or(true)
 }
 
 fn touch_stamp(store: &Store) -> Result<()> {
@@ -237,7 +270,13 @@ pub fn run_stdio(path: Option<String>) -> Result<()> {
     let mut w = std::io::stdout();
 
     let their_hello: Hello = recv_json(&mut r).context("no hello from client")?;
-    send_json(&mut w, &Hello { node: store.node_name()?, vector: store.log_vector()? })?;
+    send_json(
+        &mut w,
+        &Hello {
+            node: store.node_name()?,
+            vector: store.log_vector()?,
+        },
+    )?;
     let their_batch: Batch = recv_json(&mut r).context("no batch from client")?;
     apply_batch(&store, their_batch)?;
     // computed after apply so freshly merged state flows back in one round trip
@@ -261,7 +300,13 @@ fn make_batch(store: &Store, theirs: &HashMap<String, u64>) -> Result<Batch> {
     for (node, count) in store.log_vector()? {
         let after = *theirs.get(&node).unwrap_or(&0);
         if count > after {
-            logs.insert(node.clone(), LogSlice { after, entries: store.entries_after(&node, after)? });
+            logs.insert(
+                node.clone(),
+                LogSlice {
+                    after,
+                    entries: store.entries_after(&node, after)?,
+                },
+            );
         }
     }
     Ok(Batch {

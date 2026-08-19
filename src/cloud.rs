@@ -105,7 +105,11 @@ pub fn status(id: &str) -> Result<()> {
 
 pub fn followup(id: &str, text: &str) -> Result<()> {
     let body = json!({ "prompt": { "text": text } });
-    print_json(curl("POST", &format!("{CURSOR_API}/agents/{id}/runs"), Some(&body))?)
+    print_json(curl(
+        "POST",
+        &format!("{CURSOR_API}/agents/{id}/runs"),
+        Some(&body),
+    )?)
 }
 
 pub fn list() -> Result<()> {
@@ -162,7 +166,9 @@ pub fn load_cursor_key() {
         return;
     }
     for path in secret_files() {
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         if let Some(k) = parse_env_value(&text, CURSOR_KEY_ENV)
             .or_else(|| parse_env_value(&text, CURSOR_KEY_ALIAS))
             .filter(|s| !s.is_empty())
@@ -206,7 +212,9 @@ fn parse_env_value(contents: &str, key: &str) -> Option<String> {
         if let Some(rest) = line.strip_prefix("export ") {
             line = rest.trim();
         }
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         if k.trim() != key {
             continue;
         }
@@ -231,9 +239,20 @@ fn curl(method: &str, url: &str, body: Option<&Value>) -> Result<Value> {
     let key = std::env::var(CURSOR_KEY_ENV)
         .ok()
         .filter(|s| !s.is_empty())
-        .context("cloud:cursor needs CURSOR_API_KEY (Cursor dashboard → API keys, or ~/.secrets)")?;
+        .context(
+            "cloud:cursor needs CURSOR_API_KEY (Cursor dashboard → API keys, or ~/.secrets)",
+        )?;
     let mut cmd = Command::new(curl_bin());
-    cmd.args(["-sS", "-X", method, url, "-H", "Content-Type: application/json", "-K", "-"]);
+    cmd.args([
+        "-sS",
+        "-X",
+        method,
+        url,
+        "-H",
+        "Content-Type: application/json",
+        "-K",
+        "-",
+    ]);
     if let Some(b) = body {
         cmd.arg("--data");
         cmd.arg(serde_json::to_string(b)?);
@@ -244,7 +263,10 @@ fn curl(method: &str, url: &str, body: Option<&Value>) -> Result<Value> {
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| {
-            format!("failed to run '{}' — is curl installed?", curl_bin().display())
+            format!(
+                "failed to run '{}' — is curl installed?",
+                curl_bin().display()
+            )
         })?;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = writeln!(stdin, "header = \"Authorization: Bearer {key}\"");
@@ -300,8 +322,14 @@ mod tests {
     #[test]
     fn parse_env_value_reads_export_quotes_and_typo() {
         let text = "# c\nexport CURSOR_API_KEY='plain'\nCUSROR_API_KEY=\"typo\"\n";
-        assert_eq!(parse_env_value(text, "CURSOR_API_KEY").as_deref(), Some("plain"));
-        assert_eq!(parse_env_value(text, "CUSROR_API_KEY").as_deref(), Some("typo"));
+        assert_eq!(
+            parse_env_value(text, "CURSOR_API_KEY").as_deref(),
+            Some("plain")
+        );
+        assert_eq!(
+            parse_env_value(text, "CUSROR_API_KEY").as_deref(),
+            Some("typo")
+        );
         assert_eq!(parse_env_value(text, "MISSING"), None);
     }
 }

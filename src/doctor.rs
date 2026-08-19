@@ -50,8 +50,12 @@ fn check_local(kind: &str, herdr_up: bool) {
     let bin = on_path(kind);
     match (bin, herdr_up) {
         (true, true) => println!("ok    {kind}"),
-        (true, false) => println!("warn  {kind}: binary present, but herdr is down — no panes to spawn into"),
-        (false, true) => println!("warn  {kind}: '{kind}' not on PATH (herdr may still know how to launch it)"),
+        (true, false) => {
+            println!("warn  {kind}: binary present, but herdr is down — no panes to spawn into")
+        }
+        (false, true) => {
+            println!("warn  {kind}: '{kind}' not on PATH (herdr may still know how to launch it)")
+        }
         (false, false) => println!("miss  {kind}: no '{kind}' on PATH and herdr is down"),
     }
 }

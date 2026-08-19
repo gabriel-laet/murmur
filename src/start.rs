@@ -247,7 +247,9 @@ fn split_goal(
 /// from being mistaken for ids.
 pub fn looks_like_bead(s: &str) -> bool {
     let s = s.trim();
-    let Some((prefix, suffix)) = s.split_once('-') else { return false };
+    let Some((prefix, suffix)) = s.split_once('-') else {
+        return false;
+    };
     if prefix.is_empty() || !prefix.chars().next().unwrap().is_ascii_alphabetic() {
         return false;
     }
@@ -255,7 +257,9 @@ pub fn looks_like_bead(s: &str) -> bool {
         return false;
     }
     !suffix.is_empty()
-        && suffix.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
+        && suffix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.')
         && suffix.chars().any(|c| c.is_ascii_digit())
 }
 
@@ -321,10 +325,7 @@ fn add_worktree(
     slug: &str,
     name: &str,
 ) -> Result<(std::path::PathBuf, String)> {
-    let repo_name = repo
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo");
+    let repo_name = repo.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
     let dir = repo
         .parent()
         .unwrap_or(repo)
@@ -577,8 +578,7 @@ fn cloud_brief(
             roles[0].0
         )
     } else {
-        "Open a pull request when the work is green — do not merge it; a human reviews."
-            .to_string()
+        "Open a pull request when the work is green — do not merge it; a human reviews.".to_string()
     };
     format!(
         "[murmur] you are agent '{name}' ({kind}). Working on: {title}\n\
