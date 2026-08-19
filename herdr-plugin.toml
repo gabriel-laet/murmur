@@ -1,0 +1,21 @@
+# Herdr plugin manifest for herdr-cursor. Register this directory with
+# herdr's plugin discovery (see herdr docs → plugins) after `npm run build`
+# and putting `herdr-cursor` on PATH (npm i -g .).
+
+id = "cursor.cloud"
+name = "Cursor Cloud Agents"
+version = "0.1.0"
+description = "Cursor cloud agents as first-class herdr panes: roster, attach streams, state bridge"
+platforms = ["linux", "macos"]
+
+[[panes]]
+id = "roster"
+title = "Cursor Cloud"
+placement = "popup"
+command = ["herdr-cursor"]
+
+[[actions]]
+id = "open-roster"
+title = "Cursor Cloud: roster"
+contexts = ["workspace"]
+command = ["herdr-cursor"]
