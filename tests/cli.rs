@@ -1048,11 +1048,16 @@ esac
 fn fake_curl(dir: &std::path::Path, log: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join("fake-curl.sh");
+    // Create responses nest the agent (like the live API); everything else
+    // is exercised through the flat-id fallback via the GET endpoints.
     let script = format!(
         r#"#!/bin/sh
 cat > /dev/null
 printf '%s\n' "$*" >> "{log}"
-echo '{{"id":"bc-test-1"}}'
+case "$*" in
+  *"-X POST"*"/v1/agents "*|*"-X POST"*"/v1/agents") echo '{{"agent":{{"id":"bc-test-1","status":"CREATING"}},"run":{{"id":"run-test-1"}}}}' ;;
+  *) echo '{{"id":"bc-test-1"}}' ;;
+esac
 "#,
         log = log.display()
     );

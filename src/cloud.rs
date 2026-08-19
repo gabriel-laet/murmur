@@ -131,8 +131,11 @@ fn cursor_launch(brief: &str, repo: &RepoRef) -> Result<Launch> {
         }
     }
     let v = curl("POST", &format!("{CURSOR_API}/agents"), Some(&body))?;
+    // The live create response nests the agent: {"agent":{"id":...},"run":{...}}
+    // (verified 2026-08-19); a flat top-level id is kept as fallback.
     let id = v
-        .get("id")
+        .pointer("/agent/id")
+        .or_else(|| v.get("id"))
         .and_then(|x| x.as_str())
         .with_context(|| format!("cursor returned no agent id: {v}"))?
         .to_string();
