@@ -127,13 +127,10 @@ pub fn run(opts: Opts) -> Result<()> {
     let mut last_pane: Option<String> = None; // last *local* pane, for splits
     let mut cloud_repo: Option<cloud::RepoRef> = None;
 
-    // Never occupy the human's pane. Outside Herdr, make a workspace so
-    // the herd has a home; inside, split off the current pane.
-    let home = if herdr::inside() {
-        None
-    } else {
-        Some(herdr::create_workspace(&label, &cwd)?)
-    };
+    // Always give the herd its own Herdr workspace. Splitting the current
+    // pane when murmur itself is inside Herdr (e.g. this orchestrator)
+    // drops workers into the human's space.
+    let home = Some(herdr::create_workspace(&label, &cwd)?);
 
     for (i, (base, kind)) in roles.iter().enumerate() {
         // A cloud kind never gets a pane or a worktree: it launches on the
@@ -192,6 +189,7 @@ pub fn run(opts: Opts) -> Result<()> {
         let pane = herdr::split_pane(from, &name, &pane_cwd, direction, murmur_dir)?;
         last_pane = Some(pane.clone());
         println!("pane   {name}  {pane}  ({kind})");
+        let _ = herdr::wait_shell(&pane);
         if let Err(e) = herdr::start_agent(&name, kind, &pane) {
             eprintln!("murmur: could not start {kind} as {name}: {e}");
             continue;

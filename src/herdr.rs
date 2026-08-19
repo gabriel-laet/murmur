@@ -141,7 +141,10 @@ pub fn split_pane(
         args.push("--env".into());
         args.push(format!("MURMUR_DIR={}", dir.display()));
     }
+    // Prefer --pane <id>. A trailing positional `w14:p4` is rejected as
+    // `unknown option` on current Herdr.
     if let Some(pane) = from {
+        args.push("--pane".into());
         args.push(pane.into());
     } else {
         args.push("--current".into());
@@ -149,6 +152,20 @@ pub fn split_pane(
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let v = call(&args_ref)?;
     pane_id_from(&v).context("herdr pane split returned no pane id")
+}
+
+/// Wait until a freshly split pane looks like a shell, before `agent start`.
+pub fn wait_shell(pane: &str) -> Result<()> {
+    let _ = call(&[
+        "pane",
+        "wait-output",
+        "--regex",
+        r"[%$#❯][[:space:]]*$",
+        "--timeout",
+        "20000",
+        pane,
+    ]);
+    Ok(())
 }
 
 pub fn create_workspace(label: &str, cwd: &Path) -> Result<String> {
@@ -187,7 +204,7 @@ pub fn start_agent(name: &str, kind: &str, pane: &str) -> Result<()> {
         "--pane",
         pane,
         "--timeout",
-        "60000",
+        "180000",
     ])?;
     Ok(())
 }
