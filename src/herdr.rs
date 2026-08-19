@@ -195,7 +195,7 @@ pub fn herdr_kind(kind: &str) -> &str {
 
 pub fn start_agent(name: &str, kind: &str, pane: &str) -> Result<()> {
     let kind = herdr_kind(kind);
-    call(&[
+    match call(&[
         "agent",
         "start",
         name,
@@ -205,8 +205,40 @@ pub fn start_agent(name: &str, kind: &str, pane: &str) -> Result<()> {
         pane,
         "--timeout",
         "180000",
-    ])?;
-    Ok(())
+    ]) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("agent_not_ready") || msg.contains("blocked during startup") {
+                wait_agent_ready(pane, name)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+fn wait_agent_ready(pane: &str, name: &str) -> Result<()> {
+    for _ in 0..60 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let Ok(info) = call(&["agent", "get", pane]) else {
+            continue;
+        };
+        let node = info
+            .pointer("/result/agent")
+            .or_else(|| info.pointer("/result/pane"));
+        let status = node.and_then(|n| str_field(n, "agent_status"));
+        let ready = node
+            .and_then(|n| n.get("interactive_ready"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        match status.as_deref() {
+            Some("idle" | "working" | "done") if ready => return Ok(()),
+            Some("idle" | "working" | "done") => return Ok(()),
+            _ => {}
+        }
+    }
+    bail!("agent {name} on {pane} did not become ready after agent_not_ready")
 }
 
 pub fn prompt(target: &str, text: &str) -> Result<()> {
