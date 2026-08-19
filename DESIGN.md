@@ -44,7 +44,8 @@ Heterogeneity is *why* coordination is worth anything — same-model agents
 reduce coordination to parallelism. Which kind fits which work is judgment,
 so it is data, not code: `FLEET.md` (seeded by setup, rides git) is a
 human-curated roster pasted verbatim into the lead's brief at `murmur
-start`. Murmur never parses or routes; the lead model applies it, the human
+start`. Murmur never parses or routes (`murmur doctor` reads the kind
+column as a lint — never to route); the lead model applies it, the human
 curates it, the beads ledger (who closed/reopened what) corrects it. Mixed
 herds: `--kind claude,codex=2`.
 
@@ -149,6 +150,19 @@ Transport phases:
   replicator daemon (QUIC, LAN discovery) for push latency, private
   interfaces only. The rule that keeps it from becoming v1's orchestrator:
   servers own state; peers own copies. Kill the daemon and nothing is lost.
+
+## Cloud agents: a temporary executor
+
+Provider-hosted agents (Cursor cloud, Claude Code on the web) have no
+terminal, so herdr can't own them yet. `cloud:<backend>` kinds in `murmur
+start` bridge the gap the usual way — userland policy shelling out to a CLI
+(`curl`), one backend per match arm, like secrets. The non-goal below
+stands: launch is `start`'s policy, and nothing supervises — `cloud
+status`/`cloud prompt` are explicit commands, and the run's durable record
+is the git host's PR plus the launch id in the lead's mail. A cloud agent
+never joins the bus (no inbox, board, or claims — git is its whole
+coordination surface), so a cloud kind can't lead a mixed herd. The module
+is scaffolding to delete the day herdr grows cloud panes.
 
 ## Non-goals
 

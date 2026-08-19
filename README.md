@@ -110,7 +110,29 @@ a short, human-curated table of each kind's strengths and cost. Murmur never
 parses it; the lead's brief carries it verbatim and the lead routes slices
 to whoever fits. Every brief names peers with their kinds (`w1 (codex)`).
 With the Herdr plugin installed, an idle pane with an empty inbox gets
-pointed at ready beads.
+pointed at ready beads. `murmur doctor` lints the roster against the
+machine — herdr up, kind binaries on PATH, cloud keys present — so you
+learn a kind can't launch before a herd needs it, not after.
+
+### Cloud kinds: a temporary bridge
+
+Herdr owns execution and should eventually own cloud agents too; until it
+can, a `cloud:<backend>` kind fills the gap (today: `cloud:cursor`, via
+Cursor's background-agent API and your `CURSOR_API_KEY`):
+
+```bash
+murmur start bd-a1b2 --kind claude,cloud:cursor=2   # local lead, cloud workers
+murmur start bd-a1b2 --kind cloud:cursor=3          # no lead; you review the PRs
+```
+
+A cloud agent never touches the bus: it gets the brief as its launch
+prompt, works on the provider's VM, and comes back through the git host as
+a branch/PR referencing the bead. The lead gets each launch id as durable
+mail and follows up explicitly — `murmur cloud prompt <id> "..."`,
+`murmur cloud status <id>`, `murmur cloud list` — murmur never supervises
+the run. A cloud kind can't lead a mixed herd (it can't reach `.murmur`),
+and the API key rides only the curl call, never the bus.
+`MURMUR_CURSOR_MODEL` picks the model.
 
 ## Remote: sync, not servers
 

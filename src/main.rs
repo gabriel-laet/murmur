@@ -1,5 +1,7 @@
 mod beads;
+mod cloud;
 mod commands;
+mod doctor;
 mod fleet;
 mod herdr;
 mod hook;
@@ -170,7 +172,8 @@ enum Command {
         /// How many agents to start (lead + workers). Default 2.
         #[arg(long, default_value_t = 2)]
         workers: usize,
-        /// Agent kind (grok), or a mixed herd: claude,codex=2 (first entry leads)
+        /// Agent kind (grok), a mixed herd: claude,codex=2 (first entry leads),
+        /// or provider-hosted workers: cloud:cursor=2 (needs CURSOR_API_KEY)
         #[arg(long)]
         kind: Option<String>,
         /// Set up the board only; don't spawn Herdr panes
@@ -180,6 +183,15 @@ enum Command {
         /// branch is the integration branch and only the lead merges
         #[arg(long)]
         worktree: bool,
+    },
+    /// Check the fleet roster against what this machine can launch right now:
+    /// herdr up, kind binaries on PATH, cloud keys present
+    Doctor,
+    /// Follow up on provider-hosted agents launched by `start --kind cloud:<backend>`
+    /// (a temporary adapter until herdr owns cloud agents)
+    Cloud {
+        #[command(subcommand)]
+        cmd: CloudCmd,
     },
     /// MCP server over stdio (messaging, claims, and task tools)
     Mcp,
@@ -205,6 +217,16 @@ enum SecretCmd {
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum CloudCmd {
+    /// Show a cloud agent's state (the provider's agent record, as JSON)
+    Status { id: String },
+    /// Send a follow-up instruction to a running cloud agent
+    Prompt { id: String, text: String },
+    /// List cloud agents on the provider
+    List,
 }
 
 #[derive(Subcommand)]
@@ -300,6 +322,12 @@ fn run() -> anyhow::Result<()> {
         Command::Start { goal, bead, workers, kind, no_herdr, worktree } => {
             start::run(start::Opts { goal, bead, workers, kind, no_herdr, worktree })
         }
+        Command::Doctor => doctor::run(),
+        Command::Cloud { cmd } => match cmd {
+            CloudCmd::Status { id } => cloud::status(&id),
+            CloudCmd::Prompt { id, text } => cloud::followup(&id, &text),
+            CloudCmd::List => cloud::list(),
+        },
         Command::Mcp => mcp::run(),
         Command::Hook => hook::run(),
         Command::Herdr => herdr::run(),

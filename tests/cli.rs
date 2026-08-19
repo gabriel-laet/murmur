@@ -1042,3 +1042,185 @@ esac
         "must not re-nudge the same ready beads: {calls}"
     );
 }
+
+// ---- cloud kinds (temporary executor over curl) ----
+
+fn fake_curl(dir: &std::path::Path, log: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-curl.sh");
+    let script = format!(
+        r#"#!/bin/sh
+cat > /dev/null
+printf '%s\n' "$*" >> "{log}"
+echo '{{"id":"bc-test-1"}}'
+"#,
+        log = log.display()
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn git_repo_with_origin(dir: &std::path::Path) {
+    let run = |args: &[&str]| {
+        let out = Command::new("git").args(args).current_dir(dir).output().unwrap();
+        assert!(out.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
+    };
+    run(&["init", "-q"]);
+    run(&["remote", "add", "origin", "git@github.com:acme/demo.git"]);
+}
+
+#[test]
+fn start_all_cloud_launches_workers_via_curl() {
+    let store = fresh_dir("cloud-only");
+    let base = store.parent().unwrap().to_path_buf();
+    git_repo_with_origin(&base);
+    let log = base.join("cloud-curl.log");
+    let curl = fake_curl(&base, &log);
+    let out = Command::new(bin())
+        .args(["start", "ship dark mode", "--kind", "cloud:cursor=2"])
+        .current_dir(&base)
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_CURL", &curl)
+        .env("CURSOR_API_KEY", "test-key")
+        .env_remove("HERDR_ENV")
+        .env_remove("MURMUR_HERDR")
+        .env_remove("MURMUR_CURSOR_MODEL")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let s = stdout(&out);
+    assert!(s.contains("cloud  w1  bc-test-1"), "{s}");
+    assert!(s.contains("cloud  w2  bc-test-1"), "{s}");
+    assert!(s.contains("integration point"), "{s}");
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(calls.matches("-X POST").count(), 2, "{calls}");
+    assert!(calls.contains("https://api.cursor.com/v1/agents"), "{calls}");
+    assert!(calls.contains("https://github.com/acme/demo"), "ssh remote normalized: {calls}");
+    assert!(calls.contains("ship dark mode"), "brief rides the prompt: {calls}");
+    assert!(!calls.contains("test-key"), "the API key must never be an argv: {calls}");
+}
+
+#[test]
+fn cloud_kind_cannot_lead_a_mixed_herd() {
+    let store = fresh_dir("cloud-lead");
+    let out = Command::new(bin())
+        .args(["start", "fix auth", "--kind", "cloud:cursor,claude"])
+        .env("MURMUR_DIR", &store)
+        .env_remove("HERDR_ENV")
+        .env_remove("MURMUR_HERDR")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("can't lead"), "{}", stderr(&out));
+}
+
+#[test]
+fn mixed_herd_mails_the_lead_each_cloud_launch() {
+    let store = fresh_dir("cloud-mixed");
+    let base = store.parent().unwrap().to_path_buf();
+    git_repo_with_origin(&base);
+    let herdr_log = base.join("mixed-herdr.log");
+    let herdr = fake_herdr(
+        &base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "status --json") echo '{{"server":{{"running":true}}}}' ;;
+  "agent list") echo '{{"result":{{"agents":[]}}}}' ;;
+  "workspace create") echo '{{"result":{{"root_pane":{{"pane_id":"w1:p0"}}}}}}' ;;
+  "pane split") echo '{{"result":{{"pane":{{"pane_id":"w1:p1"}}}}}}' ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = herdr_log.display()
+        ),
+    );
+    let curl_log = base.join("mixed-curl.log");
+    let curl = fake_curl(&base, &curl_log);
+    let out = Command::new(bin())
+        .args(["start", "fix auth", "--kind", "claude,cloud:cursor"])
+        .current_dir(&base)
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &herdr)
+        .env("MURMUR_CURL", &curl)
+        .env("CURSOR_API_KEY", "test-key")
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let s = stdout(&out);
+    assert!(s.contains("pane   lead"), "{s}");
+    assert!(s.contains("cloud  w1  bc-test-1"), "{s}");
+    // the lead's brief explains how to reach cloud peers
+    let herdr_calls = std::fs::read_to_string(&herdr_log).unwrap();
+    assert!(herdr_calls.contains("Cloud peers"), "{herdr_calls}");
+    // the launch id waits durably in the lead's inbox
+    let inbox = murmur(&store, &["inbox", "--as", "lead"]);
+    let mail = stdout(&inbox);
+    assert!(mail.contains("bc-test-1"), "{mail}");
+    assert!(mail.contains("murmur cloud prompt"), "{mail}");
+}
+
+#[test]
+fn cloud_status_and_prompt_hit_the_provider_endpoints() {
+    let store = fresh_dir("cloud-cmds");
+    let base = store.parent().unwrap().to_path_buf();
+    let log = base.join("cmds-curl.log");
+    let curl = fake_curl(&base, &log);
+    let run = |args: &[&str]| {
+        Command::new(bin())
+            .args(args)
+            .env("MURMUR_DIR", &store)
+            .env("MURMUR_CURL", &curl)
+            .env("CURSOR_API_KEY", "test-key")
+            .output()
+            .unwrap()
+    };
+    let out = run(&["cloud", "status", "bc-42"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = run(&["cloud", "prompt", "bc-42", "keep going"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("-X GET https://api.cursor.com/v1/agents/bc-42"), "{calls}");
+    assert!(calls.contains("-X POST https://api.cursor.com/v1/agents/bc-42/runs"), "{calls}");
+    assert!(calls.contains("keep going"), "{calls}");
+}
+
+#[test]
+fn doctor_lints_the_roster_against_the_machine() {
+    let store = fresh_dir("doctor");
+    let base = store.parent().unwrap().to_path_buf();
+    git_repo_with_origin(&base);
+    std::fs::write(
+        base.join("FLEET.md"),
+        "# Fleet roster\n\n| kind | strong at |\n| --- | --- |\n| zz-noagent | nothing |\n| cloud:cursor | bulk |\n| cloud:nope | ? |\n",
+    )
+    .unwrap();
+    let run = |envs: &[(&str, &str)]| {
+        let mut cmd = Command::new(bin());
+        cmd.args(["doctor"])
+            .current_dir(&base)
+            .env("MURMUR_DIR", &store)
+            .env_remove("HERDR_ENV")
+            .env_remove("MURMUR_HERDR")
+            .env_remove("CURSOR_API_KEY")
+            .env_remove("MURMUR_CURL");
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
+    };
+    // nothing configured: local kind missing, cursor lacks its key, nope unknown
+    let out = run(&[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let s = stdout(&out);
+    assert!(s.contains("zz-noagent"), "{s}");
+    assert!(s.contains("CURSOR_API_KEY not set"), "{s}");
+    assert!(s.contains("unknown cloud backend"), "{s}");
+    // key + curl override + origin remote: cursor comes back ok
+    let out = run(&[("CURSOR_API_KEY", "k"), ("MURMUR_CURL", "/bin/true")]);
+    let s = stdout(&out);
+    assert!(s.contains("ok    cloud:cursor"), "{s}");
+}
