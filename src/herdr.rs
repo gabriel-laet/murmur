@@ -231,6 +231,21 @@ pub fn agent_info(name: &str) -> Option<(String, String, String)> {
     ))
 }
 
+/// A finished pane (`done`/`exited`) has no model listening: restart the
+/// same kind in the same pane so a prompt lands in a live one. Returns the
+/// kind restarted, or None when the agent was alive (or unknown to Herdr).
+pub fn revive_if_finished(name: &str) -> Result<Option<String>> {
+    let Some((status, kind, pane)) = agent_info(name) else {
+        return Ok(None);
+    };
+    let finished = matches!(status.as_str(), "done" | "exited" | "stopped" | "error");
+    if !finished || kind.is_empty() || pane.is_empty() {
+        return Ok(None);
+    }
+    start_agent(name, &kind, &pane)?;
+    Ok(Some(kind))
+}
+
 pub fn start_agent(name: &str, kind: &str, pane: &str) -> Result<()> {
     let kind = herdr_kind(kind);
     match call(&[
@@ -266,14 +281,8 @@ fn wait_agent_ready(pane: &str, name: &str) -> Result<()> {
             .pointer("/result/agent")
             .or_else(|| info.pointer("/result/pane"));
         let status = node.and_then(|n| str_field(n, "agent_status"));
-        let ready = node
-            .and_then(|n| n.get("interactive_ready"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        match status.as_deref() {
-            Some("idle" | "working" | "done") if ready => return Ok(()),
-            Some("idle" | "working" | "done") => return Ok(()),
-            _ => {}
+        if matches!(status.as_deref(), Some("idle" | "working" | "done")) {
+            return Ok(());
         }
     }
     bail!("agent {name} on {pane} did not become ready after agent_not_ready")
@@ -412,6 +421,10 @@ fn run_inner() -> Result<()> {
         new.len(),
         froms.join(", ")
     );
+    // A done pane isn't listening — revive it so the prompt lands. The
+    // wake-file dedup above bounds this to one revive per new message, so
+    // a model that finishes and stays finished is never restart-looped.
+    let _ = revive_if_finished(&name);
     let _ = prompt(&name, &prompt_text);
 
     let mut next = already;
@@ -460,6 +473,7 @@ fn nudge_ready_beads(name: &str, cwd: Option<&Path>, state_dir: &Path) {
         fresh.len(),
         listing
     );
+    let _ = revive_if_finished(name); // same dedup bound as the mail wake
     let _ = prompt(name, &text);
     let mut next = seen;
     for i in &ready {

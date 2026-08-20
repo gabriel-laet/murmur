@@ -1,8 +1,8 @@
 # murmur
 
 Cross-harness coordination for AI agents, as a directory of files. Your
-Claude Code, Codex, and Gemini sessions work in the same repo but can't talk
-to each other; murmur gives them durable inboxes, presence, a shared task
+Claude Code, Codex, Gemini, and Grok sessions work in the same repo but
+can't talk to each other; murmur gives them durable inboxes, presence, a shared task
 board with atomic work-stealing, advisory file claims, and secret references
 — all in one `.murmur/` directory, on the only transport every agent already
 shares: the filesystem. A message is a file renamed into the recipient's
@@ -121,9 +121,13 @@ a short, human-curated table of each kind's strengths and cost. Murmur never
 parses it; the lead's brief carries it verbatim and the lead routes slices
 to whoever fits. Every brief names peers with their kinds (`w1 (codex)`).
 With the Herdr plugin installed, an idle pane with an empty inbox gets
-pointed at ready beads. `murmur doctor` lints the roster against the
-machine — herdr up, kind binaries on PATH, cloud keys present — so you
-learn a kind can't launch before a herd needs it, not after.
+pointed at ready beads, and a pane whose model already finished is revived
+before any nudge — `murmur poke` does the same, so a prompt lands in a
+live model or fails loudly, never on a corpse. `murmur doctor` lints the
+roster against the machine — herdr up, kind binaries on PATH, cloud keys
+present, plus one live call to each cloud backend's API — so a missing
+binary, revoked key, or spent quota shows up before a herd needs it, not
+after.
 
 ### Cloud kinds: a temporary bridge
 

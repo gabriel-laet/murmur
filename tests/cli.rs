@@ -1,7 +1,7 @@
 //! Integration tests that drive the real binary, std-only.
 //! Each test gets its own store via MURMUR_DIR.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -361,26 +361,15 @@ fn inbox_flags_secret_references_without_resolving() {
 }
 
 fn fake_bd(base: &std::path::Path, log: &std::path::Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let stub = base.join("bd-stub.sh");
-    std::fs::write(
-        &stub,
-        format!(
-            r#"#!/bin/sh
-printf '%s\n' "$*" >> "{log}"
-case "$1" in
-  ready) echo '[{{"id":"bd-a1b2","title":"Fix login flow","description":"Users bounce on refresh."}}]' ;;
-  show) echo '{{"id":"bd-a1b2","title":"Fix login flow","description":"Users bounce on refresh.","status":"open"}}' ;;
-  create) echo '{{"id":"bd-9f3c","title":"'"$2"'","status":"open"}}' ;;
-  *) echo '{{}}' ;;
-esac
-"#,
-            log = log.display()
-        ),
+    bd_stub(
+        base,
+        "bd-stub.sh",
+        log,
+        r#"  ready) echo '[{"id":"bd-a1b2","title":"Fix login flow","description":"Users bounce on refresh."}]' ;;
+  show) echo '{"id":"bd-a1b2","title":"Fix login flow","description":"Users bounce on refresh.","status":"open"}' ;;
+  create) echo '{"id":"bd-9f3c","title":"'"$2"'","status":"open"}' ;;
+  *) echo '{}' ;;"#,
     )
-    .unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    stub
 }
 
 #[test]
@@ -1136,7 +1125,7 @@ esac
     assert!(out.status.success(), "rerun: {}", stderr(&out));
 }
 
-fn write_task(store: &PathBuf, state: &str, id: &str, title: &str) {
+fn write_task(store: &Path, state: &str, id: &str, title: &str) {
     let dir = store.join("tasks").join(state);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -1170,7 +1159,7 @@ fn task_take_skips_umbrella_when_children_are_open() {
 }
 
 /// A board task with a holder and a synced state, as sync would leave it.
-fn write_held_task(store: &PathBuf, state: &str, id: &str, holder: &str, synced: &str) {
+fn write_held_task(store: &Path, state: &str, id: &str, holder: &str, synced: &str) {
     let dir = store.join("tasks").join(state);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -1430,26 +1419,13 @@ fn beads_sync_skips_parents_of_ready_children() {
     let store = fresh_dir("beads-leaves");
     let base = store.parent().unwrap();
     let log = base.join("leaves-bd.log");
-    let stub = {
-        use std::os::unix::fs::PermissionsExt;
-        let path = base.join("bd-leaves.sh");
-        std::fs::write(
-            &path,
-            format!(
-                r#"#!/bin/sh
-printf '%s\n' "$*" >> "{log}"
-case "$1" in
-  ready) echo '[{{"id":"bd-1","title":"Epic"}},{{"id":"bd-1.2","title":"Leaf","parent":"bd-1"}}]' ;;
-  *) echo '{{}}' ;;
-esac
-"#,
-                log = log.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    };
+    let stub = bd_stub(
+        base,
+        "bd-leaves.sh",
+        &log,
+        r#"  ready) echo '[{"id":"bd-1","title":"Epic"},{"id":"bd-1.2","title":"Leaf","parent":"bd-1"}]' ;;
+  *) echo '{}' ;;"#,
+    );
     let out = Command::new(bin())
         .args(["task", "sync", "beads"])
         .env("MURMUR_DIR", &store)
@@ -1638,6 +1614,50 @@ esac
         before,
         "must not re-prompt the same mail: {calls}"
     );
+}
+
+#[test]
+fn herdr_idle_wake_revives_a_done_pane_with_mail() {
+    // "Done" is not "idle": the model finished its turn and stopped
+    // listening. New mail for a done pane must restart the agent before
+    // the prompt, or the nudge lands on a corpse.
+    let store = fresh_dir("wake-revive");
+    murmur(&store, &["join", "lead"]);
+    murmur(&store, &["send", "w1", "please review", "--as", "lead"]);
+    let base = store.parent().unwrap();
+    let log = base.join("wake-revive-herdr.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "agent get") echo '{{"result":{{"agent":{{"name":"w1","agent":"claude","pane_id":"w1:p2","cwd":".","agent_status":"done"}}}}}}' ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    let event = r#"{"event":"pane.agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w1:p2","workspace_id":"w1","agent_status":"done"}}"#;
+    let out = Command::new(bin())
+        .args(["herdr"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w1:p2")
+        .env("HERDR_PLUGIN_EVENT_JSON", event)
+        .env("HERDR_PLUGIN_STATE_DIR", base.join("wake-revive-state"))
+        .env_remove("MURMUR_BEADS")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let start_at = calls.find("agent start w1 --kind claude --pane w1:p2");
+    let prompt_at = calls.find("agent prompt w1");
+    assert!(start_at.is_some(), "done pane must be revived: {calls}");
+    assert!(prompt_at.is_some(), "{calls}");
+    assert!(start_at < prompt_at, "revive before prompt: {calls}");
 }
 
 #[test]
@@ -1910,6 +1930,25 @@ fn doctor_lints_the_roster_against_the_machine() {
     let out = run(&[("CURSOR_API_KEY", "k"), ("MURMUR_CURL", "/bin/true")]);
     let s = stdout(&out);
     assert!(s.contains("ok    cloud:cursor"), "{s}");
+    // config fine but the provider says no — the probe surfaces its message
+    let errcurl = {
+        use std::os::unix::fs::PermissionsExt;
+        let p = base.join("curl-err.sh");
+        std::fs::write(
+            &p,
+            "#!/bin/sh\necho '{\"error\":{\"message\":\"rate limit exceeded for this hour\"}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    };
+    let out = run(&[
+        ("CURSOR_API_KEY", "k"),
+        ("MURMUR_CURL", errcurl.to_str().unwrap()),
+    ]);
+    let s = stdout(&out);
+    assert!(s.contains("warn  cloud:cursor"), "{s}");
+    assert!(s.contains("rate limit exceeded"), "{s}");
 }
 
 #[test]

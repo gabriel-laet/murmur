@@ -2,12 +2,15 @@
 //!
 //! FLEET.md stays routing-opaque to murmur (the lead routes, never code);
 //! the doctor reads only its kind column, best-effort, to tell a human
-//! which kinds `murmur start` could actually launch right now: is herdr
+//! which kinds `murmur start` could actually launch *right now*: is herdr
 //! up for the local kinds, are their binaries on PATH, do cloud kinds
-//! have their key, curl, and a git origin to clone from.
+//! have their key, curl, and a git origin to clone from — and, when the
+//! static checks pass, one live authenticated call to the provider, so a
+//! revoked key or an exhausted quota shows up here, not mid-herd.
 
 use anyhow::Result;
 
+use crate::store::on_path;
 use crate::{beads, cloud, fleet, herdr};
 
 pub fn run() -> Result<()> {
@@ -77,16 +80,13 @@ fn check_cloud(kind: &str) {
     if cloud::repo_ref(&std::env::current_dir().unwrap_or_default()).is_err() {
         missing.push("no git 'origin' remote to clone from".to_string());
     }
-    if missing.is_empty() {
-        println!("ok    {kind}");
-    } else {
+    if !missing.is_empty() {
         println!("miss  {kind}: {}", missing.join(", "));
+        return;
     }
-}
-
-fn on_path(bin: &str) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&paths).any(|d| d.join(bin).is_file())
+    // Config looks launchable — ask the provider itself.
+    match cloud::probe(backend) {
+        Ok(()) => println!("ok    {kind} (api answered)"),
+        Err(e) => println!("warn  {kind}: configured, but the api probe failed: {e}"),
+    }
 }

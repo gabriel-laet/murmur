@@ -116,6 +116,26 @@ pub fn list() -> Result<()> {
     print_json(curl("GET", &format!("{CURSOR_API}/agents"), None)?)
 }
 
+/// One cheap authenticated call: can this backend launch an agent right
+/// now? A revoked key or an exhausted quota comes back as the provider's
+/// own error message. Doctor's lint — launches don't pre-probe.
+pub fn probe(backend_name: &str) -> Result<()> {
+    anyhow::ensure!(
+        known_backend(backend_name),
+        "unknown cloud backend '{backend_name}'"
+    );
+    let v = curl("GET", &format!("{CURSOR_API}/agents?limit=1"), None)?;
+    if let Some(err) = v.get("error") {
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| err.to_string());
+        bail!("{msg}");
+    }
+    Ok(())
+}
+
 fn print_json(v: Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&v)?);
     Ok(())
