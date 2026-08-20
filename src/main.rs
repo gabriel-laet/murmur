@@ -8,6 +8,7 @@ mod hook;
 mod restack;
 mod secrets;
 mod setup;
+mod skills;
 mod start;
 mod store;
 mod sync;
@@ -212,6 +213,11 @@ enum Command {
         /// brief and checked by `murmur restack`
         #[arg(long, value_name = "PATH")]
         hub: Vec<String>,
+        /// Run this command in a service pane beside each worker (dev server
+        /// etc.) — explicit only; MURMUR_WORKTREE_SLOT distinguishes
+        /// instances, port/URL allocation stays the command's business
+        #[arg(long, value_name = "CMD")]
+        with: Option<String>,
     },
     /// Plan first: start only a lead, briefed to slice the goal into beads
     /// and summon its own workers when the plan is ready
@@ -428,6 +434,7 @@ fn run() -> anyhow::Result<()> {
             board,
             worktree_cmd,
             hub,
+            with,
         } => start::run(start::Opts {
             goal,
             bead,
@@ -438,6 +445,7 @@ fn run() -> anyhow::Result<()> {
             board,
             worktree_cmd,
             hubs: hub,
+            with,
             plan: false,
         }),
         Command::Plan {
@@ -456,6 +464,7 @@ fn run() -> anyhow::Result<()> {
             board,
             worktree_cmd: None,
             hubs: hub,
+            with: None,
             plan: true,
         }),
         Command::Restack { cmd } => restack::run(cmd),

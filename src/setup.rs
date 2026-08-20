@@ -41,6 +41,10 @@ pub fn run(all: bool) -> Result<()> {
     record(".claude/settings.json (hooks)", install_hooks()?);
     record("AGENTS.md (universal contract)", install_agents_md()?);
     record("FLEET.md (fleet roster)", crate::fleet::seed()?);
+    record(
+        ".claude/skills/murmur-{lead,worker} (role playbooks)",
+        crate::skills::install()?,
+    );
 
     if all || on_path("herdr") || home_has(".config/herdr") {
         record(
@@ -232,7 +236,9 @@ fn agents_md_section() -> String {
         (or the human's) call, scoped: `--parent <epic>` or `--label <l>`. On a real\n\
         tracker an unscoped sync floods the board for everyone. Durable planning lives\n\
         in `bd` (`bd create`, `bd dep add`); decisions go in beads, chatter in murmur.\n\
-        Which agent kind fits which work is in `FLEET.md`.\n\
+        Which agent kind fits which work is in `FLEET.md`; the role playbooks live\n\
+        at `.claude/skills/murmur-lead/SKILL.md` and `murmur-worker/SKILL.md` — read\n\
+        yours (plain markdown, any harness can).\n\
         - **Don't stomp on claimed files.** `murmur claims` lists advisory file claims;\n\
         claim before editing contested files with `murmur claim <path> --as <name>` and\n\
         release after. If a file is claimed by someone else, coordinate — don't edit it.\n\

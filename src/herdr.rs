@@ -120,6 +120,7 @@ pub fn split_pane(
     cwd: &Path,
     direction: &str,
     murmur_dir: Option<&Path>,
+    extra_env: &[(&str, String)],
 ) -> Result<String> {
     let cwd_s = cwd.display().to_string();
     let mut args = vec![
@@ -133,6 +134,10 @@ pub fn split_pane(
         "--env".into(),
         format!("MURMUR_AGENT={name}"),
     ];
+    for (k, v) in extra_env {
+        args.push("--env".into());
+        args.push(format!("{k}={v}"));
+    }
     if let Some(dir) = murmur_dir {
         // A worktree pane sits outside the repo, so walking up would miss
         // the herd's shared store — pin it explicitly.
@@ -150,6 +155,17 @@ pub fn split_pane(
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let v = call(&args_ref)?;
     pane_id_from(&v).context("herdr pane split returned no pane id")
+}
+
+/// Type a command into a pane's shell — how a service pane (dev server
+/// etc.) starts. The pane owns the process; murmur never watches it, and
+/// closing the workspace ends it. Herdr builds differ on the send-keys
+/// shape, so try both.
+pub fn run_in_pane(pane: &str, cmd: &str) -> Result<()> {
+    let text = format!("{cmd}\n");
+    call(&["pane", "send-keys", pane, &text])
+        .or_else(|_| call(&["pane", "send-keys", "--pane", pane, &text]))
+        .map(|_| ())
 }
 
 /// Wait until a freshly split pane looks like a shell, before `agent start`.

@@ -136,7 +136,12 @@ impl Store {
         Ok(Store::locate_in(&cwd))
     }
 
-    /// Nearest `.murmur` walking up from `start`, else `start/.murmur`.
+    /// Nearest `.murmur` walking up from `start`; else anchored to the
+    /// repo, not the checkout: a git worktree resolves through its `.git`
+    /// file to the main checkout, so every worktree of one repo shares one
+    /// bus with no MURMUR_DIR plumbing, and a fresh store lands at the
+    /// repo root — like `.git`, never a stray per-worktree copy. Outside
+    /// git: `start/.murmur`.
     pub fn locate_in(start: &Path) -> Store {
         let mut dir = start;
         loop {
@@ -146,12 +151,12 @@ impl Store {
             }
             match dir.parent() {
                 Some(parent) => dir = parent,
-                None => {
-                    return Store {
-                        root: start.join(".murmur"),
-                    }
-                }
+                None => break,
             }
+        }
+        let root = main_repo_root(start).unwrap_or_else(|| start.to_path_buf());
+        Store {
+            root: root.join(".murmur"),
         }
     }
 
@@ -782,6 +787,30 @@ fn canonical_path(path: &str) -> String {
     match repo_identity(&abs) {
         Some((repo, rel)) => format!("{repo}::{rel}"),
         None => abs.display().to_string(),
+    }
+}
+
+/// The main checkout's root for wherever `start` sits: walk up to the
+/// nearest `.git`; a worktree's `.git` *file* points back at
+/// `<main>/.git/worktrees/<x>`, whose parent-of-parent is the main root.
+/// No subprocess. None outside a git checkout.
+fn main_repo_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = start;
+    loop {
+        let dot = dir.join(".git");
+        if dot.is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        if dot.is_file() {
+            let text = fs::read_to_string(&dot).ok()?;
+            let gitdir = text.strip_prefix("gitdir:")?.trim();
+            let main = match gitdir.rfind("/worktrees/") {
+                Some(i) => &gitdir[..i],
+                None => gitdir,
+            };
+            return Path::new(main).parent().map(|p| p.to_path_buf());
+        }
+        dir = dir.parent()?;
     }
 }
 

@@ -2531,3 +2531,157 @@ fn agents_md_contract_assigns_by_id_and_never_syncs_wholesale() {
         "the oldest-open recipe is gone: {text}"
     );
 }
+
+#[test]
+fn worktrees_resolve_to_the_main_checkouts_store() {
+    // parent of the (unused) store path — a plain unique dir
+    let base = fresh_dir("wt-locate").parent().unwrap().to_path_buf();
+    let repo = base.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(
+                ["-c", "user.email=t@t", "-c", "user.name=t"]
+                    .iter()
+                    .chain(args.iter()),
+            )
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {:?}: {}", args, stderr(&out));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(&["worktree", "add", "-q", "../repo--wt", "-b", "wt"]);
+    let wt = base.join("repo--wt");
+
+    // join from the worktree with NO MURMUR_DIR: the store must land in
+    // the main checkout, never as a stray copy in the worktree
+    let out = Command::new(bin())
+        .args(["join", "wtworker"])
+        .current_dir(&wt)
+        .env_remove("MURMUR_DIR")
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        repo.join(".murmur/agents/wtworker.json").exists(),
+        "store anchored to the repo"
+    );
+    assert!(
+        !wt.join(".murmur").exists(),
+        "no stray store in the worktree"
+    );
+
+    // mail sent from the main checkout is readable from the worktree
+    let out = Command::new(bin())
+        .args(["send", "wtworker", "one bus", "--as", "mainside"])
+        .current_dir(&repo)
+        .env_remove("MURMUR_DIR")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = Command::new(bin())
+        .args(["inbox", "--as", "wtworker"])
+        .current_dir(&wt)
+        .env_remove("MURMUR_DIR")
+        .output()
+        .unwrap();
+    assert!(stdout(&out).contains("one bus"), "{}", stdout(&out));
+}
+
+#[test]
+fn setup_seeds_role_playbook_skills_idempotently() {
+    let dir = fresh_dir("skills");
+    std::fs::create_dir_all(&dir).unwrap();
+    let run = || {
+        Command::new(bin())
+            .args(["setup"])
+            .current_dir(&dir)
+            .env("MURMUR_DIR", dir.join(".murmur"))
+            .env("HOME", &dir)
+            .env("PATH", "")
+            .output()
+            .unwrap()
+    };
+    let out = run();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let lead = dir.join(".claude/skills/murmur-lead/SKILL.md");
+    let worker = dir.join(".claude/skills/murmur-worker/SKILL.md");
+    let text = std::fs::read_to_string(&lead).unwrap();
+    assert!(text.starts_with("---\n"), "frontmatter first: {text}");
+    assert!(text.contains("murmur restack"), "{text}");
+    assert!(std::fs::read_to_string(&worker)
+        .unwrap()
+        .contains("Report to lead and STOP"));
+    let out = run();
+    assert!(stdout(&out).contains("already present"), "{}", stdout(&out));
+
+    // a human-edited skill (marker removed) is never rewritten
+    std::fs::write(&lead, "---\nname: murmur-lead\n---\nmine now\n").unwrap();
+    run();
+    assert_eq!(
+        std::fs::read_to_string(&lead).unwrap(),
+        "---\nname: murmur-lead\n---\nmine now\n"
+    );
+}
+
+#[test]
+fn start_with_runs_a_service_pane_per_worker_with_slot_facts() {
+    let store = fresh_dir("with-svc");
+    let base = store.parent().unwrap();
+    let log = base.join("svc-herdr.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "status --json") echo '{{"server":{{"running":true}}}}' ;;
+  "agent list") echo '{{"result":{{"agents":[]}}}}' ;;
+  "workspace create") echo '{{"result":{{"root_pane":{{"pane_id":"w1:p0"}}}}}}' ;;
+  "pane split")
+    n=$(grep -c "pane split" "{log}" || true)
+    echo "{{\"result\":{{\"pane\":{{\"pane_id\":\"w1:p$n\"}}}}}}" ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    let out = Command::new(bin())
+        .args([
+            "start",
+            "serve wave",
+            "--kind",
+            "grok",
+            "--workers",
+            "2",
+            "--with",
+            "pnpm dev",
+        ])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .env("MURMUR_READY_TIMEOUT_MS", "1")
+        .env_remove("MURMUR_BEADS")
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls.matches("send-keys").count(),
+        2,
+        "one service per worker: {calls}"
+    );
+    assert!(calls.contains("pnpm dev"), "{calls}");
+    assert!(
+        calls.contains("MURMUR_WORKTREE_SLOT=1") && calls.contains("MURMUR_WORKTREE_SLOT=2"),
+        "slots are facts panes carry: {calls}"
+    );
+    assert!(
+        calls.contains("A service pane beside yours runs `pnpm dev`"),
+        "briefs name the service: {calls}"
+    );
+}

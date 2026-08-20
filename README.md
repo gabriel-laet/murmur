@@ -62,8 +62,12 @@ Setup writes two tiers of integration:
   Gemini, Grok, OpenCode, anything with a shell — coordinating through the
   murmur CLI. The CLI is the protocol; there is no per-harness config.
 
-It also seeds `FLEET.md` (the fleet roster, see below) and installs the
-Herdr idle-wake plugin when Herdr is present.
+It also seeds `FLEET.md` (the fleet roster, see below), the role playbooks
+(`.claude/skills/murmur-lead/SKILL.md` and `murmur-worker/SKILL.md` —
+skill-aware harnesses load them on demand, everything else reads them as
+plain markdown; briefs point at them so role knowledge survives context
+loss), and installs the Herdr idle-wake plugin when Herdr is present. A
+playbook you edit (marker line removed) is never rewritten.
 
 Identity: `--as <name>` beats `$MURMUR_AGENT` beats the Herdr pane's agent
 name. Panes spawned by `murmur start` arrive pre-named.
@@ -143,14 +147,26 @@ what a finished wave left behind without touching inboxes or logs.
 
 **Worktrees.** With `--worktree`, each agent works in its own checkout
 (sibling of the repo, branch `herd/<slug>/<name>`) and never touches yours;
-the lead's branch is the integration branch. A monorepo whose checkouts
-need installs or symlinks brings its own helper:
+the lead's branch is the integration branch. The store is anchored to the
+repo, not the checkout: any worktree resolves through its `.git` file to
+the main checkout's `.murmur`, so the whole herd shares one bus with no
+`MURMUR_DIR` plumbing and no stray per-worktree stores. A monorepo whose
+checkouts need installs or symlinks brings its own helper:
 `--worktree-cmd 'pnpm worktree:new'` runs per agent with
-`MURMUR_WORKTREE_{DIR,BRANCH,NAME}` set — murmur keeps the location and
-branch, the helper owns the contents. Claims are keyed by repo identity
-plus relative path, so the same file claimed from two worktrees collides
-like it should. `--hub <path>` names the files everyone converges on: each
-brief carries them and `restack` flags branches touching them.
+`MURMUR_WORKTREE_{DIR,BRANCH,NAME,SLOT}` set — murmur keeps the location
+and branch, the helper owns the contents. Claims are keyed by repo
+identity plus relative path, so the same file claimed from two worktrees
+collides like it should. `--hub <path>` names the files everyone converges
+on: each brief carries them and `restack` flags branches touching them.
+
+**Services.** Automation is explicit, decided at plan time, never implied:
+`--with 'pnpm dev'` runs the command in a service pane beside each
+worker's checkout. Herdr owns the process (closing the workspace ends it);
+murmur passes exactly one fact — `MURMUR_WORKTREE_SLOT`, 1..N per agent —
+and the command allocates its own ports or URLs (a repo helper, portless,
+whatever the repo uses). Worker briefs say to verify the slice against the
+running service before reporting green; how to verify is the repo's own
+knowledge (its skills, its AGENTS.md), not murmur's.
 
 **The merge queue.** `murmur restack`, run from the integration checkout,
 merges each worker branch in one at a time — merges, never rebases; worker
@@ -253,9 +269,13 @@ The binary has two layers, held to different standards:
   `git`, and `gh` — always shelling out to CLIs, deletable without touching
   the kernel, and never a daemon.
 
-Non-goals: a scheduler or DAG executor, process supervision, routing logic
-that parses the roster, public-internet endpoints, storing secret values,
-exactly-once semantics across machines.
+One sentence covers the service question: murmur allocates facts (names,
+locks, slots) and requests panes; it never watches what runs in them.
+
+Non-goals: a scheduler or DAG executor, process supervision or
+health-checking, routing logic that parses the roster, port/URL
+allocation, public-internet endpoints, storing secret values, exactly-once
+semantics across machines.
 
 ## Command reference
 
@@ -276,6 +296,7 @@ murmur plan [goal|bead]    # one planning lead that summons its own herd
 murmur start [goal|bead]   # bead -> board -> Herdr herd
                            #   --kind claude,codex=2  --board <name>
                            #   --worktree [--worktree-cmd '<helper>']  --hub <path>
+                           #   --with '<cmd>' = a service pane per worker
 murmur stop [--board <n>]  # close the herd's workspace + worktrees
 murmur restack [--cmd]     # lead: merge worker branches one at a time
 murmur pr status           # herd branches' PRs: number, state, checks (gh)
