@@ -139,7 +139,7 @@ pub fn sync() -> Result<()> {
         match target {
             "in_progress" => {
                 let holder = task.taken_by.clone().unwrap_or_default();
-                let mut args = vec!["update", &bead_id, "--status", "in_progress"];
+                let mut args = vec!["update", &bead_id, "--status", "in_progress", "--json"];
                 if !holder.is_empty() {
                     args.push("--assignee");
                     args.push(&holder);
@@ -148,10 +148,10 @@ pub fn sync() -> Result<()> {
             }
             "closed" => {
                 let reason = attribution(&state, &task);
-                call(&["close", &bead_id, "--reason", &reason])?;
+                call(&["close", &bead_id, "--reason", &reason, "--json"])?;
             }
             _ => {
-                call(&["update", &bead_id, "--status", "open"])?;
+                call(&["update", &bead_id, "--status", "open", "--json"])?;
             }
         }
         task.synced_state = Some(state.clone());
@@ -308,8 +308,14 @@ fn call_in(cwd: Option<&Path>, args: &[&str]) -> Result<Value> {
     if trimmed.is_empty() {
         return Ok(json!({}));
     }
-    serde_json::from_str(trimmed)
-        .with_context(|| format!("bd {} returned non-JSON", args.join(" ")))
+    match serde_json::from_str(trimmed) {
+        Ok(v) => Ok(v),
+        Err(e) if args.contains(&"--json") => Err(e).with_context(|| {
+            format!("bd {} returned non-JSON", args.join(" "))
+        }),
+        // Human-text success (update/close without a parseable body) is fine.
+        Err(_) => Ok(json!({})),
+    }
 }
 
 #[cfg(test)]
