@@ -759,6 +759,14 @@ pub fn pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Is `bin` an executable file on PATH? Adapters probe before shelling out.
+pub fn on_path(bin: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|p| p.join(bin).is_file())
+}
+
 pub fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

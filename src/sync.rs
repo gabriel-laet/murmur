@@ -59,13 +59,8 @@ fn parse_target(target: &str) -> Target {
     }
     if target.contains('/') || Path::new(target).exists() {
         Target::Local(PathBuf::from(target))
-    } else if target.contains('@') {
-        Target::Ssh {
-            host: target.to_string(),
-            path: None,
-        }
     } else {
-        // a bare word that isn't a path here: treat as an ssh host
+        // anything else (with or without a user@): treat as an ssh host
         Target::Ssh {
             host: target.to_string(),
             path: None,

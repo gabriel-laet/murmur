@@ -5,6 +5,7 @@
 //! any agent can follow with no integration at all. Everything merges
 //! idempotently; existing config is never clobbered.
 
+use crate::store::on_path;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::env;
@@ -389,13 +390,6 @@ fn agents_md_section() -> String {
         into `.murmur/inbox/<recipient>/`.\n{}\n",
         AGENTS_MD_BEGIN, AGENTS_MD_END
     )
-}
-
-fn on_path(bin: &str) -> bool {
-    let Some(paths) = env::var_os("PATH") else {
-        return false;
-    };
-    env::split_paths(&paths).any(|p| p.join(bin).is_file())
 }
 
 fn home() -> Option<PathBuf> {

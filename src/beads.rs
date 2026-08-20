@@ -55,7 +55,7 @@ pub fn available_in(cwd: &Path) -> bool {
     if std::env::var_os("MURMUR_BEADS").is_some() {
         return true;
     }
-    on_path("bd") && beads_root(cwd).is_some()
+    crate::store::on_path("bd") && beads_root(cwd).is_some()
 }
 
 pub fn available() -> bool {
@@ -74,13 +74,6 @@ fn beads_root(cwd: &Path) -> Option<PathBuf> {
             return None;
         }
     }
-}
-
-fn on_path(bin: &str) -> bool {
-    let Some(paths) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&paths).any(|p| p.join(bin).is_file())
 }
 
 /// Fetch one bead by id (`bd-a1b2`).

@@ -462,7 +462,7 @@ fn add_worktree(
         } else {
             Err(anyhow::anyhow!(
                 "{}",
-                String::from_utf8_lossy(&out.stderr).trim().to_string()
+                String::from_utf8_lossy(&out.stderr).trim()
             ))
         }
     };
