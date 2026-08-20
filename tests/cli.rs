@@ -2671,7 +2671,7 @@ esac
     assert!(out.status.success(), "{}", stderr(&out));
     let calls = std::fs::read_to_string(&log).unwrap();
     assert_eq!(
-        calls.matches("send-keys").count(),
+        calls.matches("pane run").count(),
         2,
         "one service per worker: {calls}"
     );
@@ -2684,4 +2684,67 @@ esac
         calls.contains("A service pane beside yours runs `pnpm dev`"),
         "briefs name the service: {calls}"
     );
+}
+
+#[test]
+fn briefs_are_durable_and_poke_redelivers_them() {
+    // A login picker or trust dialog can eat the first brief even when the
+    // pane reports interactive-ready (observed against real herdr 0.8.2).
+    // The brief is stored at start; poke --brief re-delivers it.
+    let store = fresh_dir("brief-redeliver");
+    let base = store.parent().unwrap();
+    let log = base.join("brief-herdr.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "status --json") echo '{{"server":{{"running":true}}}}' ;;
+  "agent list") echo '{{"result":{{"agents":[]}}}}' ;;
+  "workspace create") echo '{{"result":{{"root_pane":{{"pane_id":"w1:p0"}}}}}}' ;;
+  "pane split") echo '{{"result":{{"pane":{{"pane_id":"w1:p1"}}}}}}' ;;
+  "agent get") echo '{{"result":{{"agent":{{"name":"lead","agent":"grok","pane_id":"w1:p1","agent_status":"idle"}}}}}}' ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    let out = Command::new(bin())
+        .args(["start", "durable brief", "--kind", "grok", "--workers", "1"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .env("MURMUR_READY_TIMEOUT_MS", "1")
+        .env_remove("MURMUR_BEADS")
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let saved = std::fs::read_to_string(store.join("briefs").join("lead.txt")).unwrap();
+    assert!(saved.contains("you are agent 'lead'"), "{saved}");
+
+    let out = Command::new(bin())
+        .args(["poke", "lead", "--brief"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("stored brief"), "{}", stdout(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        calls.matches("you are agent 'lead'").count() >= 2,
+        "the same brief went out twice: {calls}"
+    );
+
+    // no message and no --brief is an error, not a silent no-op
+    let out = Command::new(bin())
+        .args(["poke", "lead"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("--brief"), "{}", stderr(&out));
 }

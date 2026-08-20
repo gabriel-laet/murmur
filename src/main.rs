@@ -92,12 +92,16 @@ enum Command {
     },
     /// Who is up plus the open board, one screen
     Status,
-    /// Prompt a live Herdr agent by murmur name
+    /// Prompt a live Herdr agent by murmur name (revives finished panes)
     Poke {
         /// Agent name (lead, w1, …)
         target: String,
-        /// Prompt text
-        message: String,
+        /// Prompt text (or use --brief)
+        message: Option<String>,
+        /// Re-deliver the stored start brief — for when a login or trust
+        /// dialog ate the first delivery
+        #[arg(long)]
+        brief: bool,
     },
     /// Register your presence and see who else is here
     Join {
@@ -385,7 +389,11 @@ fn run() -> anyhow::Result<()> {
         } => commands::inbox(r#as, wait, timeout, peek, json),
         Command::Who { json } => commands::who(json),
         Command::Status => commands::status(),
-        Command::Poke { target, message } => commands::poke(&target, &message),
+        Command::Poke {
+            target,
+            message,
+            brief,
+        } => commands::poke(&target, message, brief),
         Command::Join { name } => commands::join(name),
         Command::Leave { r#as } => commands::leave(r#as),
         Command::Claim { path, ttl, r#as } => commands::claim(&path, r#as, ttl),

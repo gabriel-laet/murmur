@@ -176,12 +176,16 @@ present), and stopping with the conflicting files on the first conflict.
 `murmur pr status` is one snapshot of every herd branch's PR: number,
 state, check rollup.
 
-**Liveness.** The first brief waits for a live prompt (not just a shell),
-so workspace-trust dialogs stop eating it. `murmur poke <name> "..."`
-revives a finished pane before prompting — reach a listening model or fail
-loudly, never report success on a corpse. The Herdr plugin does the same on
-idle-wake: new mail or fresh ready beads restart a done pane before the
-nudge.
+**Liveness.** The first brief waits for the agent to settle (Herdr's own
+`agent wait`, with a poll fallback) and a blocked pane — trust prompt,
+permission dialog — is reported instead of silently stalling. Some dialogs
+(a login picker) look interactive-ready to Herdr and eat the first
+delivery anyway, so briefs are durable: `murmur poke <name> --brief`
+re-delivers the stored brief once the dialog is cleared.
+`murmur poke <name> "..."` revives a finished pane before prompting —
+reach a listening model or fail loudly, never report success on a corpse.
+The Herdr plugin does the same on idle-wake: new mail or fresh ready beads
+restart a done pane before the nudge.
 
 ## The fleet
 
@@ -301,6 +305,7 @@ murmur stop [--board <n>]  # close the herd's workspace + worktrees
 murmur restack [--cmd]     # lead: merge worker branches one at a time
 murmur pr status           # herd branches' PRs: number, state, checks (gh)
 murmur poke <name> <msg>   # prompt a Herdr agent (revives finished panes)
+                           #   --brief re-delivers the stored start brief
 murmur fleet               # roster + observed agent starts (24h / 7d)
 murmur doctor              # can this machine launch the roster right now?
 murmur cloud status|prompt|list       # follow up on provider-hosted agents

@@ -460,14 +460,26 @@ pub fn status() -> Result<()> {
 /// Deliver a prompt into a live Herdr agent by name. A pane whose model
 /// already finished (`done`/`exited`) is revived first — a poke must reach
 /// a listening prompt or fail loudly, never report success on a corpse.
-pub fn poke(target: &str, text: &str) -> Result<()> {
+pub fn poke(target: &str, text: Option<String>, brief: bool) -> Result<()> {
+    let text = match (text, brief) {
+        (Some(t), false) => t,
+        // --brief: the stored start brief — for when a login picker or
+        // trust dialog ate the first delivery, or a revived pane needs
+        // its role back.
+        (None, true) => Store::locate()?.brief_load(target)?,
+        (Some(_), true) => anyhow::bail!("pass a message or --brief, not both"),
+        (None, false) => anyhow::bail!("poke with what? give a message, or --brief"),
+    };
     if let Some(kind) = crate::herdr::revive_if_finished(target)
         .with_context(|| format!("{target} has finished and would not restart"))?
     {
         println!("revived {target} ({kind})");
     }
-    crate::herdr::prompt(target, text)?;
-    println!("prompted {target}");
+    crate::herdr::prompt(target, &text)?;
+    println!(
+        "prompted {target}{}",
+        if brief { " (stored brief)" } else { "" }
+    );
     Ok(())
 }
 

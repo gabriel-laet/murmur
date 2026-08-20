@@ -157,15 +157,12 @@ pub fn split_pane(
     pane_id_from(&v).context("herdr pane split returned no pane id")
 }
 
-/// Type a command into a pane's shell — how a service pane (dev server
-/// etc.) starts. The pane owns the process; murmur never watches it, and
-/// closing the workspace ends it. Herdr builds differ on the send-keys
-/// shape, so try both.
+/// Run a command in a pane's shell — how a service pane (dev server etc.)
+/// starts. `herdr pane run` sends the text and Enter in one call; the pane
+/// owns the process, murmur never watches it, and closing the workspace
+/// ends it.
 pub fn run_in_pane(pane: &str, cmd: &str) -> Result<()> {
-    let text = format!("{cmd}\n");
-    call(&["pane", "send-keys", pane, &text])
-        .or_else(|_| call(&["pane", "send-keys", "--pane", pane, &text]))
-        .map(|_| ())
+    call(&["pane", "run", pane, cmd]).map(|_| ())
 }
 
 /// Wait until a freshly split pane looks like a shell, before `agent start`.
@@ -259,17 +256,36 @@ pub fn started_agent_name() -> Option<String> {
     str_field(node, "name").filter(|n| store::valid_name(n).is_ok())
 }
 
-/// Block until the pane's agent is actually accepting prompts, so the
+/// Block until the pane's agent is settled and accepting prompts, so the
 /// first brief isn't eaten by a workspace-trust dialog or a startup hook
-/// review. `interactive_ready` is the definitive signal when this Herdr
-/// reports it; kinds that never report it settle for a calm status. When
-/// no signal shows up at all (older Herdr, stub), give up quickly and let
-/// the caller prompt anyway. Returns whether readiness was confirmed.
+/// review. First choice is Herdr's own primitive — `agent wait --until
+/// idle` (a blocked trust dialog times out instead of matching) — with a
+/// poll of `agent get` as the fallback for builds without it. Returns
+/// whether readiness was confirmed.
 pub fn wait_prompt_ready(pane: &str) -> bool {
     let timeout_ms: u64 = std::env::var("MURMUR_READY_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(90_000);
+    let timeout_s = timeout_ms.to_string();
+    // Default matching is idle|done|blocked: a settled agent returns fast,
+    // and a blocked one (trust dialog, permission prompt) is reported
+    // instead of stalling the whole start until the timeout.
+    if let Ok(v) = call(&["agent", "wait", pane, "--timeout", &timeout_s]) {
+        let status = v
+            .pointer("/result/agent")
+            .and_then(|n| str_field(n, "agent_status"))
+            .unwrap_or_default();
+        if status == "blocked" {
+            eprintln!(
+                "murmur: {pane} is blocked on a dialog (trust prompt?) — clear it, \
+                 then re-deliver the brief with `murmur poke <name> --brief`"
+            );
+            return false;
+        }
+        return true;
+    }
+    // Older build or stub: fall back to polling agent get.
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     let mut no_signal = 0;
     loop {

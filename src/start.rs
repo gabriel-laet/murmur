@@ -349,8 +349,12 @@ pub fn run(opts: Opts) -> Result<()> {
                 opts.with.as_deref(),
             )
         };
+        let _ = store.brief_save(&name, &brief);
         if let Err(e) = herdr::prompt(&name, &brief) {
-            eprintln!("murmur: could not prompt {name}: {e}");
+            eprintln!(
+                "murmur: could not prompt {name}: {e} — re-deliver with \
+                 `murmur poke {name} --brief`"
+            );
         }
         if let Some(cmd) = &opts.with {
             // A service pane beside the agent's checkout. The pane owns the

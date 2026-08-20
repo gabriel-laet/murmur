@@ -669,6 +669,25 @@ impl Store {
         Ok((agents_removed, claims_removed))
     }
 
+    /// Briefs are durable: a dialog (login picker, trust prompt) can eat
+    /// the first delivery even when the pane looks interactive-ready, so
+    /// the text is kept for re-delivery with `murmur poke <name> --brief`.
+    pub fn brief_save(&self, name: &str, text: &str) -> Result<()> {
+        valid_name(name)?;
+        self.init()?;
+        let dir = self.root.join("briefs");
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join(format!("{name}.txt")), text)?;
+        Ok(())
+    }
+
+    pub fn brief_load(&self, name: &str) -> Result<String> {
+        valid_name(name)?;
+        let path = self.root.join("briefs").join(format!("{name}.txt"));
+        fs::read_to_string(&path)
+            .with_context(|| format!("no stored brief for {name} (started by murmur start?)"))
+    }
+
     /// Prune what a finished herd leaves behind, without touching the live
     /// bus: local agents whose process is gone AND that nobody has seen for
     /// `age_secs`, done tasks whose files are older than `age_secs`, and
