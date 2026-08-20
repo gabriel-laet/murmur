@@ -5,7 +5,6 @@ mod doctor;
 mod fleet;
 mod herdr;
 mod hook;
-mod mcp;
 mod restack;
 mod secrets;
 mod setup;
@@ -27,7 +26,8 @@ Messages wait in the recipient's inbox until read — nobody needs to be listeni
 Identity comes from --as <name>, $MURMUR_AGENT, or the Herdr pane name.
 
 QUICK START:
-    murmur setup                           # wire every installed harness + Herdr plugin
+    murmur setup                           # hooks + AGENTS.md contract + Herdr plugin
+    murmur plan bd-a1b2 --kind claude      # one lead plans, then summons its herd
     murmur start bd-a1b2 --kind grok       # bead → board → Herdr herd
     murmur stop                            # close that herd's workspace + worktrees
     murmur send frontend \"API is ready\"    # message a peer (delivered even if they're busy)
@@ -35,10 +35,10 @@ QUICK START:
     murmur send db \"schema ok?\" --reply    # ask and block for the answer
     murmur inbox --wait                    # read your mail, block until some arrives
     murmur task add \"write auth tests\"     # put work on the shared board
-    murmur task take                       # atomically grab the oldest open task
+    murmur task take <id>                  # atomically take the task you were assigned
     murmur watch                           # (human) watch all agent chatter live
 
-Inspect everything with plain tools: cat .murmur/log.jsonl, ls .murmur/inbox/"
+Inspect everything with plain tools: cat .murmur/log/*.jsonl, ls .murmur/inbox/"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -174,7 +174,7 @@ enum Command {
         #[command(subcommand)]
         cmd: SecretCmd,
     },
-    /// Wire this repo for cross-tool agent coordination: Claude Code hooks + MCP for every installed harness (Codex, Gemini, Grok, OpenCode) + Herdr plugin + the AGENTS.md contract
+    /// Wire this repo for cross-tool agent coordination: Claude Code hooks + the AGENTS.md contract + FLEET.md + the Herdr plugin
     Setup {
         /// Wire every supported harness, even ones not detected on this machine
         #[arg(long)]
@@ -261,8 +261,6 @@ enum Command {
         #[command(subcommand)]
         cmd: CloudCmd,
     },
-    /// MCP server over stdio (messaging, claims, and task tools)
-    Mcp,
     /// Claude Code hook adapter (reads hook JSON on stdin)
     Hook,
     /// Herdr plugin adapter (idle-wake). Called by the plugin, not by hand.
@@ -271,11 +269,6 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SecretCmd {
-    /// Resolve a secret:// reference and print the value (prefer `exec`)
-    Resolve {
-        /// e.g. secret://infisical/<projectId>/<env>/[folders/]<NAME> or secret://env/<VAR>
-        reference: String,
-    },
     /// Resolve refs into a command's environment and run it — values never touch stdout or context
     Exec {
         /// NAME=secret://... pairs to inject as environment variables
@@ -422,7 +415,6 @@ fn run() -> anyhow::Result<()> {
             }
         }
         Command::Secret { cmd } => match cmd {
-            SecretCmd::Resolve { reference } => commands::secret_resolve(&reference),
             SecretCmd::Exec { pairs, command } => commands::secret_exec(pairs, command),
         },
         Command::Setup { all } => setup::run(all),
@@ -478,7 +470,6 @@ fn run() -> anyhow::Result<()> {
             CloudCmd::Prompt { id, text } => cloud::followup(&id, &text),
             CloudCmd::List => cloud::list(),
         },
-        Command::Mcp => mcp::run(),
         Command::Hook => hook::run(),
         Command::Herdr => herdr::run(),
     }

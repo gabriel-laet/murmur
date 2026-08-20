@@ -1,56 +1,74 @@
 # murmur
 
-Cross-harness coordination for AI agents, as a directory of files. Your
-Claude Code, Codex, Gemini, and Grok sessions work in the same repo but
-can't talk to each other; murmur gives them durable inboxes, presence, a shared task
-board with atomic work-stealing, advisory file claims, and secret references
-— all in one `.murmur/` directory, on the only transport every agent already
-shares: the filesystem. A message is a file renamed into the recipient's
-inbox; it waits until they read it. No daemon, no sockets, no ports. Inspect
-everything with `ls` and `cat`. Design and roadmap: [DESIGN.md](DESIGN.md).
+Cross-harness coordination for AI agents, as a directory of files.
 
-## Where murmur sits
+Your Claude Code, Codex, Gemini, and Grok sessions work in the same repo but
+can't talk to each other. Murmur gives them durable inboxes, presence, a
+shared task board with atomic work-stealing, advisory file claims, and
+secret references — all in one `.murmur/` directory, on the only transport
+every agent already shares: the filesystem. A message is a file renamed into
+the recipient's inbox; it waits until they read it. No daemon, no sockets,
+no ports. Inspect everything with `ls` and `cat`.
 
-Murmur is the middle of a three-layer stack, and deliberately overlaps with
+## How it works
+
+The format is the protocol:
+
+```text
+.murmur/
+  agents/<name>.json               presence: pid, cwd, joined_at, last_seen
+  inbox/<name>/*.json              one file per pending message, oldest first
+  claims/*.json                    advisory file claims with TTLs
+  tasks/{todo,doing,done}/*.json   a task's state is its directory
+  log/<node>.jsonl                 append-only record of every message
+  peers                            sync targets, one per line (machine-local)
+  tmp/                             staging for atomic renames
+```
+
+Sending is `write to tmp/` + `rename into inbox/` — atomic, so a reader
+never sees a half-written message. Taking a task is
+`rename(todo/X, doing/X)` — N racing agents get exactly one winner. Any
+process that can `mv` participates with no murmur installed.
+
+## The stack
+
+Murmur is the middle of a three-layer stack and deliberately overlaps with
 neither neighbor:
 
-| Layer | Owns | Doesn't do |
+| Layer | Owns | Never does |
 | --- | --- | --- |
-| [beads](https://github.com/steveyegge/beads) | planning: issues, dependencies, priorities, memory across sessions | run or message agents |
-| **murmur** | coordination: inboxes, presence, atomic task-take, claims, secret refs | plan work, spawn or supervise processes |
-| [herdr](https://herdr.dev) | execution: live panes, agent lifecycle, the screen you watch | know what a bead is, store any state |
+| [beads](https://github.com/steveyegge/beads) (`bd`) | planning: issues, dependencies, priorities, memory | run or message agents |
+| **murmur** | coordination: inboxes, presence, atomic take, claims, secret refs | plan work, supervise processes |
+| [herdr](https://herdr.dev) | execution: live panes, agent lifecycle, the screen | know what a bead is, store state |
 
-Murmur is the only layer touching both ends, always by shelling out to their
-CLIs (`bd`, `herdr`) — never their internals. Beads feeds ready work onto
-murmur's board (`task sync beads`); murmur asks herdr to open panes and
-delivers the brief (`murmur start`); herdr's idle-wake plugin calls back
-into murmur when a pane goes quiet. Kill any layer and the other two keep
-working: no herdr → agents join from any terminal; no beads → the board
-stands alone; no murmur → beads and herdr never knew about each other anyway.
+Murmur talks to its neighbors only by shelling out to their CLIs (`bd`,
+`herdr`, and `git`/`gh` for the merge queue) — never their internals. Kill
+any layer and the other two keep working.
 
 ## Install
 
 ```bash
 cargo install --path .
-murmur setup          # wire every harness found on this machine, idempotently
-murmur setup --all    # or wire all supported harnesses regardless
+murmur setup          # wire this repo; idempotent, never clobbers config
 ```
 
-| Harness         | What setup writes                                      |
-| --------------- | ------------------------------------------------------ |
-| Claude Code     | hooks in `.claude/settings.json` + MCP in `.mcp.json`  |
-| Codex CLI       | MCP in `~/.codex/config.toml`                          |
-| Gemini CLI      | MCP in `.gemini/settings.json`                         |
-| Grok CLI        | MCP in `.grok/settings.json`                           |
-| OpenCode        | MCP in `opencode.json`                                 |
-| Herdr           | plugin: idle-wake (mail + ready beads)                 |
-| everything else | the coordination contract in `AGENTS.md`               |
+Setup writes two tiers of integration:
 
-Setup also seeds `FLEET.md` (see below). Existing config is merged, never
-clobbered. Agents get harness-derived names (`claude-a1b2c3`, `codex-4410`);
-inside Herdr the pane's agent name is used; set `MURMUR_AGENT` to choose.
+- **Hooks** (Claude Code, `.claude/settings.json`): the passive, enforced
+  tier. SessionStart joins and reports peers and the board; PreToolUse
+  injects pending mail and denies edits to files claimed by others; Stop
+  blocks ending a turn with unread mail; SessionEnd leaves.
+- **AGENTS.md**: the written contract for every other harness — Codex,
+  Gemini, Grok, OpenCode, anything with a shell — coordinating through the
+  murmur CLI. The CLI is the protocol; there is no per-harness config.
 
-## Quick start
+It also seeds `FLEET.md` (the fleet roster, see below) and installs the
+Herdr idle-wake plugin when Herdr is present.
+
+Identity: `--as <name>` beats `$MURMUR_AGENT` beats the Herdr pane's agent
+name. Panes spawned by `murmur start` arrive pre-named.
+
+## Messaging and presence
 
 ```bash
 murmur join backend                                   # optional; sending also registers you
@@ -58,45 +76,48 @@ murmur send frontend "API is ready" --as backend      # waits in their inbox
 murmur send '*' "rebasing main" --as backend          # broadcast
 murmur send db "schema final?" --as backend --reply   # block until answered
 murmur inbox --as frontend --wait                     # read mail (consumes it)
-murmur who                                            # who's around
+murmur who                                            # up / idle / gone / remote
 murmur watch                                          # live feed for the human
 ```
 
-Replies are correlated by message id (`--reply-to <id>`); an unanswered
-question degrades into a plain durable message. State lives in `.murmur/`,
-found like `.git` by walking up (override with `MURMUR_DIR`).
+Replies correlate by message id (`--reply-to <id>`); an unanswered question
+degrades into a plain durable message. In `who`, `idle` means recently seen
+with no live process — agents touch presence per command, so idle is not
+dead. State lives in `.murmur/`, found like `.git` by walking up (override
+with `MURMUR_DIR`).
 
 ## Tasks: beads plans, the board executes
 
-A task is a file; taking it is an atomic rename — N racing agents get
-exactly one winner. [Beads](https://github.com/steveyegge/beads) (`bd`) is
-the tracker upstream: it owns planning, dependencies, and memory across
-sessions; the board keeps the atomic-take mechanics.
+Beads owns what exists; murmur owns who holds the lock. The board is a
+projection of `bd ready`, never a second tracker.
 
 ```bash
 murmur task add "write auth tests" --as lead
-murmur task take <id> --as worker-1   # the task your lead assigned (preferred)
-murmur task take --as worker-1        # or: the oldest open leaf
-murmur task done <id> --as worker-1   # or: task drop
-murmur task sync beads --parent bd-a1b2   # scoped pull + push, idempotent
+murmur task take <id> --as worker-1        # the task your lead assigned (preferred)
+murmur task take --as worker-1             # or: the oldest open leaf
+murmur task done <id> --as worker-1        # or: task drop
+murmur task sync beads --parent bd-a1b2    # scoped pull + push, idempotent
 ```
 
-Only *ready* beads (no open blockers) land on the board, keeping their ids;
-take/done/drop push back as in_progress/closed/open with the agent named.
-Beads wins identity: only leaves are takeable (never an epic with ready
-children), a bead closed in beads ends the murmur task over any local take,
-and a beads assignee beats a conflicting holder. Pulls are scoped: on a
-tracker with more than ~20 ready leaves an unscoped `task sync beads` pulls
-nothing and tells you to pass `--parent <epic>`, `--label <l>`, or `--all` —
-one agent following a generic recipe can no longer flood the board for
-everyone. No `bd` installed? The board works standalone.
+The rules, enforced by the sync adapter:
 
-## Herds and the fleet
+- Only *ready* leaves land on the board. A parent of a ready bead is never
+  takeable — not even when it is the only file on the board.
+- A bead closed in beads ends the murmur task no matter who holds the take;
+  the ex-holder gets mail.
+- A beads assignee beats a conflicting local take (forced drop, mailed).
+- Pulls are scoped. Past ~20 ready leaves an unscoped `task sync beads`
+  pulls nothing and says to pass `--parent <epic>`, `--label <l>`, or
+  `--all` — one agent following a generic recipe cannot flood the board.
 
-`murmur start` pulls a bead onto the board (a goal string becomes a new
-bead) and, if [Herdr](https://herdr.dev) is running, opens panes, starts
-named agents, and hands each a brief. After that, coordination is the board
-and inboxes — murmur never supervises.
+No `bd` installed? The board works standalone.
+
+## Herds
+
+`murmur start` puts the work on the board (a goal string becomes a bead
+when `bd` is around) and, if Herdr is running, opens panes, starts named
+agents, and hands each a brief. After that, coordination is the board and
+inboxes — murmur never supervises.
 
 ```bash
 murmur plan bd-a1b2 --kind claude            # plan-first: one lead, no workers yet
@@ -105,85 +126,71 @@ murmur start bd-a1b2 --kind claude,codex=2   # mixed: claude leads, codex works
 murmur start bd-a1b2 --kind grok --worktree  # one git worktree per agent
 murmur start bd-a1b2 --board oficina         # this herd gets its own bus
 murmur start "fix claim TTLs" --no-herdr     # board only; prints how to join
-murmur stop                                  # close that herd's workspace + worktrees
+murmur stop                                  # close workspace, presence, worktrees
 ```
 
-`murmur plan` is the shell-first flow: it stands up a single lead briefed to
-explore, slice the goal into beads (`bd create` + `bd dep add`), and then
-summon its own workers with `murmur start --bead <epic>` from its pane — when
-a *named agent* runs `start`, the caller becomes the lead and every requested
-kind spawns as its worker, so no rival lead appears. `--board <name>` gives
-the herd a private store (`.murmur-<name>/`, panes get `MURMUR_DIR`
-automatically) so two waves on one machine never mix agents, mail, or tasks;
-`murmur clean --stale` prunes what a finished wave left behind without
-touching inboxes or logs. `--hub <path>` names the files everyone will
-converge on: each brief carries them and `restack` flags branches touching
-them.
+**Plan first.** `murmur plan` stands up a single lead briefed to explore,
+slice the goal into beads (`bd create` + `bd dep add`), then summon its own
+workers with `murmur start --bead <epic>` from its pane. When a *named
+agent* runs `start`, the caller becomes the lead and every requested kind
+spawns as its worker — no rival lead. A human's plain shell spawns a lead
+as before.
 
-`start` writes `herd.json` and joins every local agent so `murmur who` sees
-them immediately (`idle` means recently seen, not dead). `stop` closes the
-Herdr workspace (from a pane that is not inside it), drops presence, and
-removes the worktrees `--worktree` created. Only *leaf* ready beads land on
-the board — a parent with ready children is skipped, and `task take` also
-skips an id that has dotted children still open, so a worker cannot swallow
-the epic. A monorepo whose checkouts need installs or symlinks brings its
-own helper: `--worktree-cmd 'pnpm worktree:new'` runs it per agent with
-`MURMUR_WORKTREE_{DIR,BRANCH,NAME}` set, murmur keeps the location and
-branch. Claims are keyed by repo identity + relative path, so the same file
-claimed from two worktrees of one repo collides like it should.
+**Isolation.** `--board <name>` gives the herd a private store
+(`.murmur-<name>/`; panes get `MURMUR_DIR` automatically), so two waves on
+one machine never mix agents, mail, or tasks. `murmur clean --stale` prunes
+what a finished wave left behind without touching inboxes or logs.
 
-The lead's merge queue is a command now: `murmur restack` (run from the
-integration checkout) merges each worker branch in one at a time — no
-rebases, worker branches are other people's checkouts — gates each merge on
-`--cmd 'pnpm test'`, warns when a branch touches a hub file, holds a branch
-whose PR checks are failing (when `gh` is present), and stops with the
-conflicting files on the first conflict. `murmur pr status` is one snapshot
-of every herd branch's PR: number, state, check rollup.
+**Worktrees.** With `--worktree`, each agent works in its own checkout
+(sibling of the repo, branch `herd/<slug>/<name>`) and never touches yours;
+the lead's branch is the integration branch. A monorepo whose checkouts
+need installs or symlinks brings its own helper:
+`--worktree-cmd 'pnpm worktree:new'` runs per agent with
+`MURMUR_WORKTREE_{DIR,BRANCH,NAME}` set — murmur keeps the location and
+branch, the helper owns the contents. Claims are keyed by repo identity
+plus relative path, so the same file claimed from two worktrees collides
+like it should. `--hub <path>` names the files everyone converges on: each
+brief carries them and `restack` flags branches touching them.
 
-With `--worktree`, each agent works in its own worktree (a sibling of the
-repo, branch `herd/<slug>/<name>`) and never touches your checkout; panes
-share one `.murmur` via `MURMUR_DIR`. The lead's branch is the integration
-branch and its brief carries the merge queue: merge worker branches one at
-a time, test after each, only the lead merges. Isolation replaces claims
-within the herd; PRs and review stay on your git host.
+**The merge queue.** `murmur restack`, run from the integration checkout,
+merges each worker branch in one at a time — merges, never rebases; worker
+branches are other people's live checkouts — gating each merge on
+`--cmd 'pnpm test'`, holding branches whose PR checks fail (when `gh` is
+present), and stopping with the conflicting files on the first conflict.
+`murmur pr status` is one snapshot of every herd branch's PR: number,
+state, check rollup.
+
+**Liveness.** The first brief waits for a live prompt (not just a shell),
+so workspace-trust dialogs stop eating it. `murmur poke <name> "..."`
+revives a finished pane before prompting — reach a listening model or fail
+loudly, never report success on a corpse. The Herdr plugin does the same on
+idle-wake: new mail or fresh ready beads restart a done pane before the
+nudge.
+
+## The fleet
 
 Different models are good at different work — that's what `FLEET.md` holds:
-a short, human-curated table of each kind's strengths and cost. Murmur never
-parses it; the lead's brief carries it verbatim and the lead routes slices
-to whoever fits. Murmur can't see provider quotas, but it counts what it
-launches: every agent start lands in a machine-level tally, `murmur fleet`
-shows it (24h/7d), and the lead's brief carries the last-24h line so a
-planner sizes the herd against what's already been burned. Every brief names peers with their kinds (`w1 (codex)`).
-With the Herdr plugin installed, an idle pane with an empty inbox gets
-pointed at ready beads, and a pane whose model already finished is revived
-before any nudge — `murmur poke` does the same, so a prompt lands in a
-live model or fails loudly, never on a corpse. `murmur doctor` lints the
-roster against the machine — herdr up, kind binaries on PATH, cloud keys
-present, plus one live call to each cloud backend's API — so a missing
-binary, revoked key, or spent quota shows up before a herd needs it, not
-after.
+a short, human-curated table of each kind's strengths and cost. Murmur
+never parses it for routing; the lead's brief carries it verbatim and the
+lead routes. Two commands read it as data:
 
-### Cloud kinds: a temporary bridge
+- `murmur doctor` lints the roster against the machine: herdr up, kind
+  binaries on PATH, cloud keys present, plus one live call to each cloud
+  backend's API — a revoked key or spent quota shows up before a herd
+  needs it.
+- `murmur fleet` shows what this machine actually launched (24h / 7d, per
+  kind). Murmur can't see provider quotas, but it counts its own starts,
+  and the lead's brief carries the 24h tally so a planner sizes the herd
+  against what's already been burned.
 
-Herdr owns execution and should eventually own cloud agents too; until it
-can, a `cloud:<backend>` kind fills the gap (today: `cloud:cursor`, via
-Cursor's background-agent API and `CURSOR_API_KEY` from the environment,
-`$HERDR_PLUGIN_CONFIG_DIR/.env`, or `~/.secrets`):
+### Cloud kinds
 
-```bash
-murmur start bd-a1b2 --kind claude,cloud:cursor=2   # local lead, cloud workers
-murmur start bd-a1b2 --kind cloud:cursor=3          # no lead; you review the PRs
-```
-
-A cloud agent never touches the bus — no inbox, no board, no claims, and
-no worktree from murmur: it gets the brief as its launch prompt, works on
-the provider's VM (you bring nothing; it clones), and comes back through
-the git host as a branch/PR referencing the bead. The lead gets each launch id as durable
-mail and follows up explicitly — `murmur cloud prompt <id> "..."`,
-`murmur cloud status <id>`, `murmur cloud list` — murmur never supervises
-the run. A cloud kind can't lead a mixed herd (it can't reach `.murmur`),
-and the API key rides only the curl call, never the bus.
-`MURMUR_CURSOR_MODEL` picks the model.
+Until Herdr owns provider-hosted agents, `cloud:<backend>` bridges the gap
+(today: `cloud:cursor`, via `CURSOR_API_KEY`). A cloud agent never touches
+the bus — no inbox, no board, no claims, no worktree: it gets the brief as
+its launch prompt, works on the provider's VM, and comes back through the
+git host as a PR referencing the bead. Follow up explicitly with
+`murmur cloud status|prompt|list`. A cloud kind can't lead a mixed herd.
 
 ## Remote: sync, not servers
 
@@ -196,22 +203,13 @@ murmur sync dev@buildbox:work/myrepo   # over ssh — your existing keys
 murmur sync /mnt/shared/myrepo         # or any path both machines see
 ```
 
-List peers in `.murmur/peers` (one path or `user@host[:path]` per line) and
-sync runs itself: forced after every `send`, debounced (30s default,
-`MURMUR_SYNC_INTERVAL`) on `inbox`, in the hook, and in the idle-wake.
-Best-effort and non-interactive — a dead peer warns once per interval, never
-hangs. One side listing the other suffices; every sync exchanges both ways.
-
-**A remote agent needs nothing new**: a Herdr pane whose command is `ssh`
-(or `mosh`), the repo + `murmur setup` on the box, one line in your peers
-file. Work crosses via git (beads), chatter via peer sync. Agents you can't
-ssh into (Claude Code on the web, CI) still share the durable layer, because
-beads rides the repo.
-
-There is no atomic rename across machines: if two nodes take the same task
-during a partition, the conflict resolves deterministically on sync and the
-loser's `task done` fails visibly. Syncing with a host means trusting it,
-like `git pull`.
+List peers in `.murmur/peers` and sync runs itself: forced after `send`,
+debounced on `inbox`, in the hook, and in the idle-wake. Best-effort and
+non-interactive; a dead peer warns once per interval. There is no atomic
+rename across machines: a doubly-taken task resolves deterministically on
+sync and the loser's `task done` fails visibly. Syncing with a host means
+trusting it, like `git pull`. Durable cross-machine work rides git anyway
+(beads in the repo, PRs on the host); sync carries the chatter.
 
 ## Secrets: references, never values
 
@@ -223,90 +221,77 @@ murmur send bob "creds: secret://infisical/proj-123/dev/DATABASE_URL" --as alice
 murmur secret exec DATABASE_URL=secret://infisical/proj-123/dev/DATABASE_URL -- psql
 ```
 
-Resolution happens at the receiver's edge with *their* backend identity
-(`INFISICAL_TOKEN` etc.); the value goes only into the child command's
-environment. If they can't read it, it fails by the backend's policy. Hooks
-and MCP never auto-resolve; refs arrive labeled "never resolve this into
-your context." `secret://env/<VAR>` covers the local case.
-
-## Harness integrations
-
-Three tiers, all over the same directory — `setup` writes the configs:
-
-1. **Hooks** (Claude Code): fully passive. SessionStart joins and reports
-   peers/board; PreToolUse injects pending mail and denies edits to files
-   claimed by others (free files are auto-claimed, released after the edit);
-   Stop blocks ending a turn with unread mail; SessionEnd leaves.
-2. **MCP** (Claude Code, Codex, Gemini, Grok, OpenCode): proactive tools —
-   `send_message`, `broadcast`, `ask`, `check_inbox`, `list_agents`,
-   `claim_file`, `release_file`, `add_task`, `take_task`, `complete_task`,
-   `list_tasks`.
-3. **AGENTS.md** (everything else): a marked, idempotent section telling any
-   agent how to coordinate here — including the raw file protocol for agents
-   without murmur installed.
-
-The format is the protocol:
-
-```text
-.murmur/
-  agents/<name>.json     presence: pid, cwd, joined_at, last_seen
-  inbox/<name>/*.json    one file per pending message, oldest-first
-  claims/*.json          advisory file claims with TTLs
-  tasks/{todo,doing,done}/*.json   take = rename into doing/
-  log.jsonl              append-only record of every message
-  peers                  sync targets, one per line (machine-local)
-  tmp/                   staging for atomic renames
-```
-
-A message is `{"id","from","to","ts","body"}` plus optional `re` and
-`wants_reply`. Send by hand: write JSON to `tmp/`, `mv` into
-`inbox/<recipient>/`.
+Resolution happens only inside `secret exec`, at the receiver's edge, with
+the receiver's own backend identity (`INFISICAL_TOKEN` etc.); the value
+goes into the child command's environment and nowhere else — never stdout,
+never a context window. Hooks never auto-resolve; refs arrive labeled
+"never resolve this into your context". `secret://env/<VAR>` covers the
+local case.
 
 ## File claims
 
-Advisory locks with TTLs (default 15 min) so a crashed agent never
-deadlocks anyone. Automatic around every Edit/Write with the hook installed.
+Advisory locks with TTLs (default 60 min) so a crashed agent never
+deadlocks anyone. Automatic around every Edit/Write with the hook
+installed; within a worktree herd, branch isolation plus `restack` is the
+real serializer and claims are the guardrail.
 
 ```bash
-murmur claim src/auth.rs --as backend    # yours; peers get an error + who holds it
+murmur claim src/auth.rs --as backend    # peers get an error + who holds it
 murmur release src/auth.rs --as backend
 murmur claims
 ```
 
-## All commands
+## Design rules
+
+The binary has two layers, held to different standards:
+
+- **The kernel** (store, mail, tasks, claims, sync) is mechanism only. It
+  never spawns, schedules, prompts, routes, or parses FLEET.md. If a change
+  makes the kernel know more about planning than `bd ready`, reject it.
+- **Userland** (`start`, `plan`, `restack`, `pr`, `doctor`, briefs) is
+  deliberately opinionated policy over the kernel plus `bd`, `herdr`,
+  `git`, and `gh` — always shelling out to CLIs, deletable without touching
+  the kernel, and never a daemon.
+
+Non-goals: a scheduler or DAG executor, process supervision, routing logic
+that parses the roster, public-internet endpoints, storing secret values,
+exactly-once semantics across machines.
+
+## Command reference
 
 ```bash
 murmur send <to> [msg]     # deliver ('*' = broadcast; stdin if no msg)
-                           #   --reply blocks for an answer; --reply-to <id> answers
+                           #   --reply blocks; --reply-to <id> answers
 murmur inbox               # read + consume your mail (--wait, --peek, --json)
-murmur who                 # list agents and liveness
+murmur who                 # agents and liveness (up / idle / gone / remote)
+murmur status              # who is up + the open board
 murmur join [name]         # register presence, see peers
 murmur leave               # deregister, release claims
 murmur claim <path>        # advisory claim (--ttl secs)
 murmur release <path>      # release a claim
 murmur claims              # list active claims
-murmur task add|list|take|done|drop   # shared work queue (take [id] = assigned task)
-murmur task sync beads                # reconcile with beads; scope: --parent/--label/--all
-murmur plan [goal|bd-a1b2]            # one planning lead that summons its own herd
-murmur start [goal|bd-a1b2]           # bead → board → Herdr herd
-                                      #   --kind claude,codex=2 --board <name> --hub <path>
-                                      #   --worktree [--worktree-cmd '<helper>']
-murmur restack [--cmd '<test>']       # lead: merge worker branches one at a time
-murmur pr status                      # herd branches' PRs: number, state, checks (gh)
-murmur fleet                          # roster + murmur-observed agent starts
-murmur stop [--board <name>]          # close the last herd's workspace + worktrees
-murmur status                         # who is up + the open board
-murmur poke <name> <msg>              # prompt a Herdr agent (revives finished panes)
-murmur secret exec NAME=<ref> -- cmd  # resolve secret refs into a command's env
-murmur secret resolve <ref>           # resolve to stdout (prefer exec)
+murmur task add|list|take|done|drop   # the board (take [id] = assigned task)
+murmur task sync beads     # reconcile with beads: --parent/--label/--all
+murmur plan [goal|bead]    # one planning lead that summons its own herd
+murmur start [goal|bead]   # bead -> board -> Herdr herd
+                           #   --kind claude,codex=2  --board <name>
+                           #   --worktree [--worktree-cmd '<helper>']  --hub <path>
+murmur stop [--board <n>]  # close the herd's workspace + worktrees
+murmur restack [--cmd]     # lead: merge worker branches one at a time
+murmur pr status           # herd branches' PRs: number, state, checks (gh)
+murmur poke <name> <msg>   # prompt a Herdr agent (revives finished panes)
+murmur fleet               # roster + observed agent starts (24h / 7d)
+murmur doctor              # can this machine launch the roster right now?
+murmur cloud status|prompt|list       # follow up on provider-hosted agents
+murmur secret exec NAME=<ref> -- cmd  # resolve refs into a command's env
+murmur sync [peer]         # reconcile with a peer .murmur (ssh or path)
 murmur log [-n N]          # recent message history
 murmur watch               # follow all traffic live (--all for history)
 murmur clean               # prune dead agents + expired claims
-                           #   --stale: old herd leftovers too; --all: rm .murmur
-murmur sync [peer]         # reconcile with a peer; no target = walk .murmur/peers
-murmur setup               # wire every installed harness (--all: all supported)
-murmur mcp                 # MCP server over stdio
-murmur hook                # Claude Code hook adapter
+                           #   --stale: old herd leftovers; --all: rm .murmur
+murmur setup               # hooks + AGENTS.md + FLEET.md + Herdr plugin
+murmur hook                # Claude Code hook adapter (used by setup)
+murmur herdr               # Herdr plugin adapter (used by the plugin)
 ```
 
 ## License

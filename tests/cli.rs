@@ -311,13 +311,22 @@ fn secret_exec_propagates_exit_codes() {
 }
 
 #[test]
-fn secret_resolve_fails_on_unknown_backend_and_missing_var() {
+fn secret_exec_fails_on_unknown_backend_and_missing_var() {
     let store = fresh_dir("secret-errors");
-    let out = murmur(&store, &["secret", "resolve", "secret://vault/x/KEY"]);
+    let out = murmur(
+        &store,
+        &["secret", "exec", "K=secret://vault/x/KEY", "--", "true"],
+    );
     assert!(!out.status.success());
     assert!(stderr(&out).contains("unknown secret backend"));
     let out = Command::new(bin())
-        .args(["secret", "resolve", "secret://env/MURMUR_DEFINITELY_UNSET"])
+        .args([
+            "secret",
+            "exec",
+            "K=secret://env/MURMUR_DEFINITELY_UNSET",
+            "--",
+            "true",
+        ])
         .env("MURMUR_DIR", &store)
         .env_remove("MURMUR_DEFINITELY_UNSET")
         .output()
@@ -667,12 +676,8 @@ fn setup_is_idempotent_and_merges() {
     let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
     assert_eq!(pre.len(), 2, "existing hook kept, murmur hook appended");
     assert!(settings["hooks"]["Stop"].is_array());
-    let mcp: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(workdir.join(".mcp.json")).unwrap()).unwrap();
-    assert_eq!(mcp["mcpServers"]["murmur"]["command"], "murmur");
-
-    // Undetected harnesses are reported, not wired.
-    assert!(stdout(&out).contains("not found:"), "{}", stdout(&out));
+    // No MCP, no per-harness config: the CLI is the protocol.
+    assert!(!workdir.join(".mcp.json").exists());
     assert!(!workdir.join(".gemini/settings.json").exists());
 
     // AGENTS.md carries the universal contract, idempotently.
@@ -693,19 +698,17 @@ fn setup_is_idempotent_and_merges() {
 }
 
 #[test]
-fn setup_all_wires_every_harness() {
+fn setup_all_appends_the_contract_and_wires_the_plugin() {
     let dir = fresh_dir("setup-all");
     let workdir = dir.parent().unwrap().to_path_buf();
     let home = workdir.join("fake-home");
     std::fs::create_dir_all(&home).unwrap();
-    // Pre-existing AGENTS.md and codex config survive and get appended to.
+    // Pre-existing AGENTS.md survives and gets appended to.
     std::fs::write(
         workdir.join("AGENTS.md"),
         "# My project\n\nBuild with make.\n",
     )
     .unwrap();
-    std::fs::create_dir_all(home.join(".codex")).unwrap();
-    std::fs::write(home.join(".codex/config.toml"), "model = \"o4\"\n").unwrap();
     let run = |args: &[&str]| {
         Command::new(bin())
             .args(args)
@@ -721,28 +724,12 @@ fn setup_all_wires_every_harness() {
     let out2 = run(&["setup", "--all"]); // idempotent
     assert!(out2.status.success());
 
-    let codex = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
-    assert!(
-        codex.starts_with("model = \"o4\""),
-        "existing config kept: {}",
-        codex
-    );
-    assert_eq!(codex.matches("[mcp_servers.murmur]").count(), 1);
-    assert!(codex.contains("MURMUR_HARNESS"));
-
-    for (path, key) in [
-        (".gemini/settings.json", "mcpServers"),
-        (".grok/settings.json", "mcpServers"),
-        ("opencode.json", "mcp"),
-    ] {
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(workdir.join(path)).unwrap()).unwrap();
-        assert!(
-            v[key]["murmur"].is_object(),
-            "{} missing murmur entry",
-            path
-        );
-    }
+    // The CLI is the protocol: no per-harness MCP configs are written.
+    assert!(!workdir.join(".mcp.json").exists());
+    assert!(!workdir.join(".gemini/settings.json").exists());
+    assert!(!workdir.join(".grok/settings.json").exists());
+    assert!(!workdir.join("opencode.json").exists());
+    assert!(!home.join(".codex/config.toml").exists());
 
     let agents = std::fs::read_to_string(workdir.join("AGENTS.md")).unwrap();
     assert!(

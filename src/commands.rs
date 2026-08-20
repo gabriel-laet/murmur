@@ -14,7 +14,7 @@ pub fn identity(explicit: Option<String>) -> Result<String> {
     Ok(name)
 }
 
-/// Best-effort name with no error — used by the hook and MCP adapters.
+/// Best-effort name with no error — used by the hook adapter.
 pub fn ambient(explicit: Option<String>) -> Option<String> {
     if let Some(name) = explicit.filter(|s| !s.is_empty()) {
         return Some(name);
@@ -468,15 +468,6 @@ pub fn poke(target: &str, text: &str) -> Result<()> {
     }
     crate::herdr::prompt(target, text)?;
     println!("prompted {target}");
-    Ok(())
-}
-
-/// Prints the value to stdout. `exec` is the safer path — values in a
-/// terminal end up in scrollback, logs, and agent context.
-pub fn secret_resolve(reference: &str) -> Result<()> {
-    let value = crate::secrets::resolve(reference)?;
-    eprintln!("note: value printed to stdout — prefer `murmur secret exec NAME=<ref> -- <cmd>`");
-    println!("{}", value);
     Ok(())
 }
 

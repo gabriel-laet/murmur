@@ -132,8 +132,6 @@ pub fn split_pane(
         "--no-focus".into(),
         "--env".into(),
         format!("MURMUR_AGENT={name}"),
-        "--env".into(),
-        "MURMUR_HARNESS=herdr".into(),
     ];
     if let Some(dir) = murmur_dir {
         // A worktree pane sits outside the repo, so walking up would miss

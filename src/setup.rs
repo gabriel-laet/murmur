@@ -1,9 +1,10 @@
-//! `murmur setup` — wire the current repo for agent coordination across
-//! every harness on the machine, in one command. Claude Code gets hooks +
-//! MCP; Codex, Gemini CLI, Grok CLI, and OpenCode get the MCP server in
-//! their own config formats; AGENTS.md gets the coordination contract that
-//! any agent can follow with no integration at all. Everything merges
-//! idempotently; existing config is never clobbered.
+//! `murmur setup` — wire the current repo for agent coordination in one
+//! command. Two tiers, one directory: Claude Code gets hooks (the passive,
+//! enforced adapter), and AGENTS.md gets the coordination contract every
+//! other harness — Codex, Gemini, Grok, OpenCode, anything with a shell —
+//! follows through the murmur CLI, no per-harness config at all. The CLI
+//! is the protocol. Everything merges idempotently; existing config is
+//! never clobbered.
 
 use crate::store::on_path;
 use anyhow::{Context, Result};
@@ -35,21 +36,11 @@ pub fn run(all: bool) -> Result<()> {
         }
     };
 
-    // Always: Claude Code (the hook is the richest adapter) and AGENTS.md
-    // (the contract every other agent reads).
+    // Claude Code gets hooks (the enforced tier); every other harness
+    // coordinates through the murmur CLI as written in AGENTS.md.
     record(".claude/settings.json (hooks)", install_hooks()?);
-    record(".mcp.json (Claude Code MCP)", install_mcp_json()?);
     record("AGENTS.md (universal contract)", install_agents_md()?);
     record("FLEET.md (fleet roster)", crate::fleet::seed()?);
-
-    // Detected harnesses — or every supported one with --all.
-    for h in HARNESSES {
-        if all || (h.detect)() {
-            record(h.target, (h.install)()?);
-        } else {
-            skipped.push(h.name);
-        }
-    }
 
     if all || on_path("herdr") || home_has(".config/herdr") {
         record(
@@ -81,40 +72,6 @@ pub fn run(all: bool) -> Result<()> {
     println!("Watch the cross-tool traffic with: murmur watch");
     Ok(())
 }
-
-struct Harness {
-    name: &'static str,
-    target: &'static str,
-    detect: fn() -> bool,
-    install: fn() -> Result<bool>,
-}
-
-const HARNESSES: [Harness; 4] = [
-    Harness {
-        name: "codex",
-        target: "~/.codex/config.toml (Codex MCP)",
-        detect: || on_path("codex") || home_has(".codex"),
-        install: install_codex,
-    },
-    Harness {
-        name: "gemini",
-        target: ".gemini/settings.json (Gemini CLI MCP)",
-        detect: || on_path("gemini") || home_has(".gemini"),
-        install: install_gemini,
-    },
-    Harness {
-        name: "grok",
-        target: ".grok/settings.json (Grok CLI MCP)",
-        detect: || on_path("grok") || home_has(".grok"),
-        install: install_grok,
-    },
-    Harness {
-        name: "opencode",
-        target: "opencode.json (OpenCode MCP)",
-        detect: || on_path("opencode") || home_has(".config/opencode"),
-        install: install_opencode,
-    },
-];
 
 fn install_hooks() -> Result<bool> {
     let path = Path::new(".claude/settings.json");
@@ -156,110 +113,6 @@ fn install_hooks() -> Result<bool> {
         write_json(path, &root)?;
     }
     Ok(changed)
-}
-
-/// Claude Code (and anything else that reads .mcp.json).
-fn install_mcp_json() -> Result<bool> {
-    add_mcp_server(Path::new(".mcp.json"), "mcpServers", "claude")
-}
-
-/// Gemini CLI reads project-level .gemini/settings.json.
-fn install_gemini() -> Result<bool> {
-    add_mcp_server(Path::new(".gemini/settings.json"), "mcpServers", "gemini")
-}
-
-/// Grok CLI reads project-level .grok/settings.json.
-fn install_grok() -> Result<bool> {
-    add_mcp_server(Path::new(".grok/settings.json"), "mcpServers", "grok")
-}
-
-/// Shared shape: {"<key>": {"murmur": {command, args, env}}} merged into a
-/// JSON config file.
-fn add_mcp_server(path: &Path, key: &str, harness: &str) -> Result<bool> {
-    let mut root = read_json(path)?;
-    let servers = root
-        .as_object_mut()
-        .with_context(|| format!("{} is not a JSON object", path.display()))?
-        .entry(key)
-        .or_insert_with(|| json!({}));
-    let servers = servers
-        .as_object_mut()
-        .with_context(|| format!("'{}' in {} is not an object", key, path.display()))?;
-    if servers.contains_key("murmur") {
-        return Ok(false);
-    }
-    servers.insert(
-        "murmur".into(),
-        json!({
-            "command": "murmur",
-            "args": ["mcp"],
-            "env": { "MURMUR_HARNESS": harness }
-        }),
-    );
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)?;
-        }
-    }
-    write_json(path, &root)?;
-    Ok(true)
-}
-
-/// OpenCode's opencode.json uses a different shape: mcp.<name> with a
-/// command array and "type": "local".
-fn install_opencode() -> Result<bool> {
-    let path = Path::new("opencode.json");
-    let mut root = read_json(path)?;
-    let obj = root
-        .as_object_mut()
-        .context("opencode.json is not a JSON object")?;
-    obj.entry("$schema")
-        .or_insert_with(|| json!("https://opencode.ai/config.json"));
-    let mcp = obj.entry("mcp").or_insert_with(|| json!({}));
-    let mcp = mcp
-        .as_object_mut()
-        .context("'mcp' in opencode.json is not an object")?;
-    if mcp.contains_key("murmur") {
-        return Ok(false);
-    }
-    mcp.insert(
-        "murmur".into(),
-        json!({
-            "type": "local",
-            "command": ["murmur", "mcp"],
-            "enabled": true,
-            "environment": { "MURMUR_HARNESS": "opencode" }
-        }),
-    );
-    write_json(path, &root)?;
-    Ok(true)
-}
-
-/// Codex has no project-level config; its MCP servers live in
-/// ~/.codex/config.toml. Appending a table is valid TOML wherever the file
-/// currently ends, and a plain-text substring check keeps it idempotent —
-/// no TOML dependency, same move as shelling out to curl and ssh.
-fn install_codex() -> Result<bool> {
-    let home = home().context("HOME is not set — cannot find ~/.codex/config.toml")?;
-    let path = home.join(".codex/config.toml");
-    let existing = if path.exists() {
-        fs::read_to_string(&path)?
-    } else {
-        String::new()
-    };
-    if existing.contains("[mcp_servers.murmur]") {
-        return Ok(false);
-    }
-    let mut out = existing;
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(
-        "\n[mcp_servers.murmur]\ncommand = \"murmur\"\nargs = [\"mcp\"]\nenv = { \"MURMUR_HARNESS\" = \"codex\" }\n",
-    );
-    fs::create_dir_all(path.parent().unwrap())?;
-    fs::write(&path, out)?;
-    Ok(true)
 }
 
 /// Write the Herdr plugin (idle-wake) into ~/.config/murmur/herdr-plugin

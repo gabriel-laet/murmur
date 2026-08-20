@@ -6,7 +6,7 @@
 //!   agents/<name>.json    presence (pid, cwd, last_seen)
 //!   inbox/<name>/*.json   one file per pending message
 //!   claims/<path>.json    advisory file claims with TTL
-//!   log.jsonl             append-only copy of every message
+//!   log/<node>.jsonl      append-only record of every message
 //!   tmp/                  staging for atomic renames
 //! ```
 //!
