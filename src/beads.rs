@@ -32,6 +32,14 @@ pub struct Issue {
     pub title: String,
     pub body: String,
     pub parent: Option<String>,
+    pub status: String,
+    pub assignee: Option<String>,
+}
+
+impl Issue {
+    pub fn closed(&self) -> bool {
+        matches!(self.status.as_str(), "closed" | "done")
+    }
 }
 
 pub fn bin() -> PathBuf {
@@ -128,6 +136,8 @@ pub fn sync() -> Result<()> {
         }
     }
 
+    let reconciled = reconcile_authority(&store, &issues)?;
+
     let mut pushed = 0;
     for (state, mut task) in store.task_list(&STATES)? {
         let Some(bead_id) = task.external_id.clone() else {
@@ -144,14 +154,13 @@ pub fn sync() -> Result<()> {
                     args.push("--assignee");
                     args.push(&holder);
                 }
-                call(&args)?;
+                call_mut(&args)?;
             }
             "closed" => {
-                let reason = attribution(&state, &task);
-                call(&["close", &bead_id, "--reason", &reason, "--json"])?;
+                close(&bead_id, &attribution(&state, &task))?;
             }
             _ => {
-                call(&["update", &bead_id, "--status", "open", "--json"])?;
+                call_mut(&["update", &bead_id, "--status", "open", "--json"])?;
             }
         }
         task.synced_state = Some(state.clone());
@@ -160,10 +169,105 @@ pub fn sync() -> Result<()> {
     }
 
     println!(
-        "beads: pulled {} ready bead(s), pushed {} transition(s)",
-        pulled, pushed
+        "beads: pulled {} ready bead(s), reconciled {} from beads, pushed {} transition(s)",
+        pulled, reconciled, pushed
     );
     Ok(())
+}
+
+/// Beads wins identity. For every open board task that mirrors a bead:
+/// a closed bead ends the task no matter who holds the murmur lock, and a
+/// beads assignee overrides a conflicting local take (the loser is
+/// force-dropped and mailed). One `bd show` per task that needs checking —
+/// boards are small; tasks whose bead is still in the ready set are open
+/// by definition and skipped.
+fn reconcile_authority(store: &Store, ready: &[Issue]) -> Result<usize> {
+    let ready_ids: std::collections::HashSet<&str> = ready.iter().map(|i| i.id.as_str()).collect();
+    let mut reconciled = 0;
+    for (state, task) in store.task_list(&["todo", "doing"])? {
+        let Some(bead_id) = task.external_id.clone() else {
+            continue;
+        };
+        if state == "todo" && ready_ids.contains(bead_id.as_str()) {
+            continue;
+        }
+        let Ok(issue) = fetch(&bead_id) else {
+            continue; // can't reach beads for this one — leave the board alone
+        };
+        if issue.closed() {
+            if let Some(was) = store.task_force_done(&task.id, "beads")? {
+                reconciled += 1;
+                if let Some(holder) = was.taken_by.filter(|_| state == "doing") {
+                    let _ = store.send(
+                        "beads",
+                        &holder,
+                        &format!(
+                            "{bead_id} was closed in beads — your take of task {} is void \
+                             and the task is done. Take something else.",
+                            task.id
+                        ),
+                        None,
+                        false,
+                    );
+                }
+            }
+            continue;
+        }
+        if state == "doing" {
+            let assignee = issue.assignee.as_deref().unwrap_or_default();
+            let holder = task.taken_by.as_deref().unwrap_or_default();
+            if !assignee.is_empty() && !holder.is_empty() && assignee != holder {
+                if let Some((_, ex)) = store.task_force_drop(&task.id)? {
+                    reconciled += 1;
+                    let _ = store.send(
+                        "beads",
+                        &ex,
+                        &format!(
+                            "{bead_id} is assigned to {assignee} in beads — your take of \
+                             task {} was dropped. Take something else.",
+                            task.id
+                        ),
+                        None,
+                        false,
+                    );
+                }
+            }
+        }
+    }
+    Ok(reconciled)
+}
+
+/// Board ids `task take` must skip because beads says so: an external task
+/// is takeable only while its bead is still ready and is not the parent of
+/// another ready bead. Best-effort — no beads (or a failing `bd`) vetoes
+/// nothing, and the dotted-id heuristic in the kernel still applies.
+pub fn take_veto(store: &Store) -> std::collections::HashSet<String> {
+    let mut veto = std::collections::HashSet::new();
+    if !available() {
+        return veto;
+    }
+    let Ok(todo) = store.task_list(&["todo"]) else {
+        return veto;
+    };
+    let external: Vec<String> = todo
+        .into_iter()
+        .filter_map(|(_, t)| t.external_id)
+        .collect();
+    if external.is_empty() {
+        return veto;
+    }
+    let Ok(issues) = ready() else {
+        return veto;
+    };
+    let ready_ids: std::collections::HashSet<&str> = issues.iter().map(|i| i.id.as_str()).collect();
+    let parents: std::collections::HashSet<&str> =
+        issues.iter().filter_map(|i| i.parent.as_deref()).collect();
+    for id in external {
+        if !ready_ids.contains(id.as_str()) || parents.contains(id.as_str()) {
+            veto.insert(id);
+        }
+    }
+    veto
 }
 
 /// Ready beads that are not the parent of another ready bead. Workers
@@ -177,7 +281,7 @@ pub fn leaves(issues: &[Issue]) -> Vec<&Issue> {
         .collect()
 }
 
-fn task_from_issue(issue: &Issue) -> Task {
+pub fn task_from_issue(issue: &Issue) -> Task {
     Task {
         id: issue.id.clone(),
         title: issue.title.clone(),
@@ -240,11 +344,22 @@ fn parse_issue(v: &Value) -> Option<Issue> {
         .or_else(|| v.get("design"))
         .and_then(|x| x.as_str())
         .unwrap_or_default();
+    let status = v.get("status").and_then(|x| x.as_str()).unwrap_or_default();
+    let assignee = v
+        .get("assignee")
+        .and_then(|x| {
+            x.as_str()
+                .or_else(|| x.get("name").and_then(|n| n.as_str()))
+        })
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
     Some(Issue {
         id: id.to_string(),
         title: title.to_string(),
         body: body.to_string(),
         parent: parse_parent(v),
+        status: status.to_string(),
+        assignee,
     })
 }
 
@@ -284,6 +399,28 @@ pub fn call(args: &[&str]) -> Result<Value> {
     call_in(None, args)
 }
 
+/// Mutating calls (`update`, `close`): ask for JSON, but a zero exit with
+/// human-text output (a checkmark, a summary line) is still success — some
+/// `bd` builds print prose even under `--json`, and aborting the rest of a
+/// sync over an unparseable "✓" is worse than moving on.
+fn call_mut(args: &[&str]) -> Result<()> {
+    match call(args) {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("returned non-JSON") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Close a bead, treating "already closed" as success: if beads got there
+/// first (another agent, another node), the goal state holds — stop.
+fn close(bead_id: &str, reason: &str) -> Result<()> {
+    match call_mut(&["close", bead_id, "--reason", reason, "--json"]) {
+        Ok(()) => Ok(()),
+        Err(e) if e.to_string().to_lowercase().contains("closed") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 fn call_in(cwd: Option<&Path>, args: &[&str]) -> Result<Value> {
     let mut cmd = Command::new(bin());
     cmd.args(args);
@@ -310,9 +447,9 @@ fn call_in(cwd: Option<&Path>, args: &[&str]) -> Result<Value> {
     }
     match serde_json::from_str(trimmed) {
         Ok(v) => Ok(v),
-        Err(e) if args.contains(&"--json") => Err(e).with_context(|| {
-            format!("bd {} returned non-JSON", args.join(" "))
-        }),
+        Err(e) if args.contains(&"--json") => {
+            Err(e).with_context(|| format!("bd {} returned non-JSON", args.join(" ")))
+        }
         // Human-text success (update/close without a parseable body) is fine.
         Err(_) => Ok(json!({})),
     }

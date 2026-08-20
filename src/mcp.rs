@@ -161,19 +161,26 @@ fn call_tool(tool: &str, args: &Value, name: &str) -> Result<String> {
             let task = store.task_add(name, &str_arg("title"), &str_arg("body"))?;
             Ok(format!("added task {}", task.id))
         }
-        "take_task" => match store.task_take(name)? {
-            Some(task) => Ok(format!(
-                "took task {}: {}{}\nmark it finished with complete_task when done",
-                task.id,
-                task.title,
-                if task.body.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n{}", task.body)
-                }
-            )),
-            None => Ok("no open tasks".into()),
-        },
+        "take_task" => {
+            let veto = crate::beads::take_veto(&store);
+            match store.task_take(name, &veto)? {
+                Some(task) => Ok(format!(
+                    "took task {}: {}{}\nmark it finished with complete_task when done",
+                    task.id,
+                    task.title,
+                    if task.body.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n{}", task.body)
+                    }
+                )),
+                None if store.open_task_count() > 0 => Ok(
+                    "no open leaf tasks — what's left is an epic or work beads no longer offers"
+                        .into(),
+                ),
+                None => Ok("no open tasks".into()),
+            }
+        }
         "complete_task" => {
             let task = store.task_done(name, &str_arg("id"))?;
             Ok(format!("done: {} {}", task.id, task.title))

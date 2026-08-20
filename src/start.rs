@@ -32,13 +32,35 @@ pub fn run(opts: Opts) -> Result<()> {
 
     let task = if let Some(id) = &bead_id {
         let issue = beads::fetch(id)?;
-        let (task, new) = beads::ensure_task(&store, &issue)?;
-        if new {
-            println!("board  {}  {}", task.id, task.title);
+        let ready = beads::ready().unwrap_or_default();
+        let is_parent = ready
+            .iter()
+            .any(|i| i.parent.as_deref() == Some(id.as_str()));
+        if is_parent {
+            // Kicking a herd at an epic: the board becomes its ready
+            // frontier, never the epic itself — a worker's `task take`
+            // must land on a leaf.
+            let mut placed = 0;
+            for leaf in beads::leaves(&ready) {
+                if store.task_import(beads::task_from_issue(leaf))? {
+                    println!("board  {}  {}", leaf.id, leaf.title);
+                    placed += 1;
+                }
+            }
+            println!(
+                "epic   {}  {} — {placed} ready leaf task(s) boarded; the epic stays in beads",
+                issue.id, issue.title
+            );
+            beads::task_from_issue(&issue) // brief context only, never imported
         } else {
-            println!("board  {}  {} (already on the board)", task.id, task.title);
+            let (task, new) = beads::ensure_task(&store, &issue)?;
+            if new {
+                println!("board  {}  {}", task.id, task.title);
+            } else {
+                println!("board  {}  {} (already on the board)", task.id, task.title);
+            }
+            task
         }
-        task
     } else {
         let title = goal.clone().unwrap();
         // A goal string still deserves a durable home: make it a bead when

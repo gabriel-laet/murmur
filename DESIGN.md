@@ -113,6 +113,17 @@ their ids; transitions push back (take → in_progress + assignee, done →
 closed with attribution, drop → open); `synced_state` makes pushes
 non-repeating.
 
+There is one assignment, and beads owns it. Beads decides what exists;
+murmur decides who has the lock; the board is a projection of `bd ready`,
+never a second tracker. Concretely: only leaves pull (a parent of a ready
+bead never lands as takeable work, and `task take` refuses a mirrored task
+beads no longer offers — even when it is the only file on the board); a
+bead closed in beads ends the murmur task no matter who holds the take,
+with the ex-holder mailed; a beads assignee beats a conflicting local take
+(forced drop, mailed). Mutating `bd` calls ask for `--json` but treat
+human-text output on a green exit as success, and closing an
+already-closed bead is success — the goal state holds.
+
 The content rule: anything a future session needs (decisions, discovered
 work, links) goes to beads; anything only this conversation needs flows
 through murmur and is consumed. Three timescales — beads is memory

@@ -82,7 +82,10 @@ murmur task sync beads                # ready beads ⇄ board, both ways, idempo
 
 Only *ready* beads (no open blockers) land on the board, keeping their ids;
 take/done/drop push back as in_progress/closed/open with the agent named.
-No `bd` installed? The board works standalone.
+Beads wins identity: only leaves are takeable (never an epic with ready
+children), a bead closed in beads ends the murmur task over any local take,
+and a beads assignee beats a conflicting holder. No `bd` installed? The
+board works standalone.
 
 ## Herds and the fleet
 

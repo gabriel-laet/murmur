@@ -1159,10 +1159,233 @@ fn task_take_skips_umbrella_when_children_are_open() {
     let task: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(task["id"], "bd-1.2", "leaf, not the epic: {}", stdout(&out));
 
-    // child now doing — parent still skipped
+    // child now doing — parent still skipped, and the refusal says why
     let out = murmur(&store, &["task", "take", "--as", "w2"]);
     assert!(!out.status.success(), "parent must stay: {}", stdout(&out));
-    assert!(stderr(&out).contains("no open tasks"));
+    assert!(
+        stderr(&out).contains("no open leaf tasks"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// A board task with a holder and a synced state, as sync would leave it.
+fn write_held_task(store: &PathBuf, state: &str, id: &str, holder: &str, synced: &str) {
+    let dir = store.join("tasks").join(state);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{id}.json")),
+        format!(
+            r#"{{"id":"{id}","title":"t","body":"","by":"beads","ts":1,"taken_by":"{holder}","external_id":"{id}","synced_state":"{synced}"}}"#
+        ),
+    )
+    .unwrap();
+}
+
+fn bd_stub(base: &std::path::Path, name: &str, log: &std::path::Path, cases: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = base.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{log}\"\ncase \"$1\" in\n{cases}\nesac\n",
+            log = log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn take_refuses_the_epic_when_beads_holds_the_children() {
+    // The parent is the ONLY file on the board — the dotted-id heuristic
+    // can't see the children, but beads can: take must refuse, not swallow
+    // the epic.
+    let store = fresh_dir("veto-epic");
+    let base = store.parent().unwrap();
+    let log = base.join("veto-bd.log");
+    let stub = bd_stub(
+        base,
+        "bd-veto.sh",
+        &log,
+        r#"  ready) echo '[{"id":"bd-1","title":"Epic"},{"id":"bd-1.2","title":"Leaf","parent":"bd-1"}]' ;;
+  *) echo '{}' ;;"#,
+    );
+    write_task(&store, "todo", "bd-1", "epic");
+    let out = Command::new(bin())
+        .args(["task", "take", "--as", "w1"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_BEADS", &stub)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("no open leaf tasks"),
+        "{}",
+        stderr(&out)
+    );
+    let list = stdout(&murmur(&store, &["task", "list"]));
+    assert!(list.contains("todo   bd-1"), "epic must stay open: {list}");
+}
+
+#[test]
+fn beads_closed_beats_a_murmur_take() {
+    // Another agent closed the bead; this node still holds the murmur take.
+    // Sync must end the task locally, never reopen or re-close the bead,
+    // and tell the ex-holder.
+    let store = fresh_dir("beads-closed");
+    let base = store.parent().unwrap();
+    let log = base.join("closed-bd.log");
+    let stub = bd_stub(
+        base,
+        "bd-closed.sh",
+        &log,
+        r#"  ready) echo '[]' ;;
+  show) echo '{"id":"bd-a1b2","title":"t","status":"closed"}' ;;
+  *) echo '{}' ;;"#,
+    );
+    write_held_task(&store, "doing", "bd-a1b2", "w1", "doing");
+    let out = Command::new(bin())
+        .args(["task", "sync", "beads"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_BEADS", &stub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("reconciled 1"), "{}", stdout(&out));
+
+    let list = stdout(&murmur(&store, &["task", "list", "--all"]));
+    assert!(list.contains("done   bd-a1b2"), "{list}");
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !calls.contains("close bd-a1b2"),
+        "already closed — no push: {calls}"
+    );
+    assert!(
+        !calls.contains("--status open"),
+        "never reopen a closed bead: {calls}"
+    );
+    let mail = stdout(&murmur(&store, &["inbox", "--as", "w1"]));
+    assert!(
+        mail.contains("closed in beads"),
+        "holder must be told: {mail}"
+    );
+}
+
+#[test]
+fn beads_assignee_wins_a_contested_take() {
+    // Beads says w2 owns the bead; this node's take by w1 loses: forced
+    // drop, mail to w1, and no "open" pushed back over the assignment.
+    let store = fresh_dir("beads-assignee");
+    let base = store.parent().unwrap();
+    let log = base.join("assignee-bd.log");
+    let stub = bd_stub(
+        base,
+        "bd-assignee.sh",
+        &log,
+        r#"  ready) echo '[]' ;;
+  show) echo '{"id":"bd-a1b2","title":"t","status":"in_progress","assignee":"w2"}' ;;
+  *) echo '{}' ;;"#,
+    );
+    write_held_task(&store, "doing", "bd-a1b2", "w1", "doing");
+    let out = Command::new(bin())
+        .args(["task", "sync", "beads"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_BEADS", &stub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("reconciled 1"), "{}", stdout(&out));
+
+    let list = stdout(&murmur(&store, &["task", "list"]));
+    assert!(list.contains("todo   bd-a1b2"), "{list}");
+    assert!(!list.contains("taken by"), "the lock is gone: {list}");
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        !calls.contains("--status open"),
+        "the losing node must not reopen over the assignee: {calls}"
+    );
+    let mail = stdout(&murmur(&store, &["inbox", "--as", "w1"]));
+    assert!(mail.contains("assigned to w2"), "{mail}");
+}
+
+#[test]
+fn bd_human_text_on_mutations_is_success() {
+    // Some bd builds print a checkmark even under --json. A green exit on
+    // update/close is success; sync must carry on and mark the push done.
+    let store = fresh_dir("beads-checkmark");
+    let base = store.parent().unwrap();
+    let log = base.join("checkmark-bd.log");
+    let stub = bd_stub(
+        base,
+        "bd-checkmark.sh",
+        &log,
+        r#"  ready) echo '[{"id":"bd-a1b2","title":"t"}]' ;;
+  show) echo '{"id":"bd-a1b2","title":"t","status":"open"}' ;;
+  update|close) echo '✓ ok' ;;
+  *) echo '{}' ;;"#,
+    );
+    let sync = || {
+        Command::new(bin())
+            .args(["task", "sync", "beads"])
+            .env("MURMUR_DIR", &store)
+            .env("MURMUR_BEADS", &stub)
+            .output()
+            .unwrap()
+    };
+    let out = sync();
+    assert!(out.status.success(), "{}", stderr(&out));
+    murmur(&store, &["task", "take", "--as", "w1"]);
+    let out = sync();
+    assert!(
+        out.status.success(),
+        "checkmark must not abort: {}",
+        stderr(&out)
+    );
+    assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
+    let out = sync();
+    assert!(
+        stdout(&out).contains("pushed 0"),
+        "push stays idempotent: {}",
+        stdout(&out)
+    );
+    murmur(&store, &["task", "done", "bd-a1b2", "--as", "w1"]);
+    let out = sync();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
+}
+
+#[test]
+fn start_at_an_epic_boards_the_leaves() {
+    let store = fresh_dir("start-epic");
+    let base = store.parent().unwrap();
+    let log = base.join("epic-bd.log");
+    let stub = bd_stub(
+        base,
+        "bd-epic.sh",
+        &log,
+        r#"  ready) echo '[{"id":"bd-1.2","title":"Leaf A","parent":"bd-1"},{"id":"bd-1.3","title":"Leaf B","parent":"bd-1"}]' ;;
+  show) echo '{"id":"bd-1","title":"The epic","status":"open"}' ;;
+  *) echo '{}' ;;"#,
+    );
+    let out = Command::new(bin())
+        .args(["start", "--bead", "bd-1", "--no-herdr"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_BEADS", &stub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("epic   bd-1"), "{}", stdout(&out));
+    let list = stdout(&murmur(&store, &["task", "list"]));
+    assert!(list.contains("bd-1.2"), "{list}");
+    assert!(list.contains("bd-1.3"), "{list}");
+    assert!(
+        !list
+            .lines()
+            .any(|l| l.split_whitespace().nth(1) == Some("bd-1")),
+        "the epic must not be takeable: {list}"
+    );
 }
 
 #[test]

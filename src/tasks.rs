@@ -6,6 +6,7 @@
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -119,8 +120,10 @@ impl Store {
     /// Grab the oldest todo task. Atomic under contention: the rename either
     /// succeeds (it's yours) or fails (someone else won; try the next one).
     /// Parent ids with dotted children on the board are skipped so a worker
-    /// cannot swallow the epic.
-    pub fn task_take(&self, name: &str) -> Result<Option<Task>> {
+    /// cannot swallow the epic; `veto` lets an adapter widen that set with
+    /// what the upstream tracker knows (a parent whose children never made
+    /// it onto this board, a bead that closed under us).
+    pub fn task_take(&self, name: &str, veto: &HashSet<String>) -> Result<Option<Task>> {
         store::valid_name(name)?;
         self.task_init()?;
         self.touch(name)?;
@@ -144,7 +147,7 @@ impl Store {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
-            if Self::is_umbrella(id, &open_ids) {
+            if Self::is_umbrella(id, &open_ids) || veto.contains(id) {
                 continue;
             }
             let dest = self.task_dir("doing").join(file_name);
@@ -193,6 +196,53 @@ impl Store {
         fs::write(&dest, serde_json::to_vec(&task)?)?;
         fs::remove_file(&path)?;
         Ok(task)
+    }
+
+    /// The upstream tracker closed this work: move it to done no matter who
+    /// holds the lock — a murmur take cannot resurrect a closed bead.
+    /// Returns the task as it was (holder intact) or None if it isn't open.
+    pub fn task_force_done(&self, id: &str, by: &str) -> Result<Option<Task>> {
+        self.task_init()?;
+        for state in ["todo", "doing"] {
+            let path = self.task_dir(state).join(format!("{id}.json"));
+            let Ok(bytes) = fs::read(&path) else { continue };
+            let Ok(mut task) = serde_json::from_slice::<Task>(&bytes) else {
+                continue;
+            };
+            let before = task.clone();
+            task.done_by = Some(task.taken_by.clone().unwrap_or_else(|| by.to_string()));
+            task.synced_state = Some("done".into());
+            fs::write(
+                self.task_dir("done").join(format!("{id}.json")),
+                serde_json::to_vec(&task)?,
+            )?;
+            fs::remove_file(&path)?;
+            return Ok(Some(before));
+        }
+        Ok(None)
+    }
+
+    /// The upstream tracker assigned this work to someone else: put it back
+    /// on the board over the local holder's head. Returns the ex-holder.
+    /// `synced_state` is cleared — the tracker was never told about the
+    /// losing take, so there is nothing to push back.
+    pub fn task_force_drop(&self, id: &str) -> Result<Option<(Task, String)>> {
+        self.task_init()?;
+        let path = self.task_dir("doing").join(format!("{id}.json"));
+        let Ok(bytes) = fs::read(&path) else {
+            return Ok(None);
+        };
+        let Ok(mut task) = serde_json::from_slice::<Task>(&bytes) else {
+            return Ok(None);
+        };
+        let holder = task.taken_by.take().unwrap_or_default();
+        task.synced_state = None;
+        fs::write(
+            self.task_dir("todo").join(format!("{}.json", task.id)),
+            serde_json::to_vec(&task)?,
+        )?;
+        fs::remove_file(&path)?;
+        Ok(Some((task, holder)))
     }
 
     /// Import an externally-sourced task onto the board unless a task with

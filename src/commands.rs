@@ -366,7 +366,8 @@ pub fn task_list(all: bool, json: bool) -> Result<()> {
 pub fn task_take(name: Option<String>, json: bool) -> Result<()> {
     let name = identity(name)?;
     let store = Store::locate()?;
-    match store.task_take(&name)? {
+    let veto = crate::beads::take_veto(&store);
+    match store.task_take(&name, &veto)? {
         Some(task) => {
             if json {
                 println!("{}", serde_json::to_string(&task)?);
@@ -386,7 +387,15 @@ pub fn task_take(name: Option<String>, json: bool) -> Result<()> {
             }
             Ok(())
         }
-        None => anyhow::bail!("no open tasks"),
+        None => {
+            if store.open_task_count() > 0 {
+                anyhow::bail!(
+                    "no open leaf tasks — what's left is an epic waiting on its \
+                     children or work beads no longer offers"
+                );
+            }
+            anyhow::bail!("no open tasks")
+        }
     }
 }
 
