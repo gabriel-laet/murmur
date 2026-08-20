@@ -31,6 +31,7 @@ pub struct Issue {
     pub id: String,
     pub title: String,
     pub body: String,
+    pub parent: Option<String>,
 }
 
 pub fn bin() -> PathBuf {
@@ -119,9 +120,10 @@ pub fn ensure_task(store: &Store, issue: &Issue) -> Result<(Task, bool)> {
 pub fn sync() -> Result<()> {
     let store = Store::locate()?;
 
+    let issues = ready()?;
     let mut pulled = 0;
-    for issue in ready()? {
-        if store.task_import(task_from_issue(&issue))? {
+    for issue in leaves(&issues) {
+        if store.task_import(task_from_issue(issue))? {
             pulled += 1;
         }
     }
@@ -161,6 +163,17 @@ pub fn sync() -> Result<()> {
         pulled, pushed
     );
     Ok(())
+}
+
+/// Ready beads that are not the parent of another ready bead. Workers
+/// should take leaves; the epic stays in beads until the children close.
+pub fn leaves(issues: &[Issue]) -> Vec<&Issue> {
+    let parents: std::collections::HashSet<&str> =
+        issues.iter().filter_map(|i| i.parent.as_deref()).collect();
+    issues
+        .iter()
+        .filter(|i| !parents.contains(i.id.as_str()))
+        .collect()
 }
 
 fn task_from_issue(issue: &Issue) -> Task {
@@ -230,7 +243,40 @@ fn parse_issue(v: &Value) -> Option<Issue> {
         id: id.to_string(),
         title: title.to_string(),
         body: body.to_string(),
+        parent: parse_parent(v),
     })
+}
+
+fn parse_parent(v: &Value) -> Option<String> {
+    if let Some(s) = v
+        .get("parent")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(s.to_string());
+    }
+    if let Some(s) = v
+        .get("parent")
+        .and_then(|x| x.get("id"))
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(s.to_string());
+    }
+    v.get("dependencies")
+        .and_then(|d| d.as_array())
+        .and_then(|arr| {
+            arr.iter().find_map(|dep| {
+                (dep.get("type").and_then(|t| t.as_str()) == Some("parent-child"))
+                    .then(|| {
+                        dep.get("depends_on_id")
+                            .and_then(|x| x.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                    })
+                    .flatten()
+            })
+        })
 }
 
 pub fn call(args: &[&str]) -> Result<Value> {
@@ -267,7 +313,7 @@ fn call_in(cwd: Option<&Path>, args: &[&str]) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{issue_list, transition};
+    use super::{issue_list, leaves, transition};
     use serde_json::json;
 
     #[test]
@@ -303,5 +349,30 @@ mod tests {
             issue_list(&json!({"count": 0})).is_empty(),
             "no id, no issue"
         );
+    }
+
+    #[test]
+    fn parent_parses_from_field_object_or_dep() {
+        let field = json!({"id": "bd-1.2", "title": "leaf", "parent": "bd-1"});
+        assert_eq!(issue_list(&field)[0].parent.as_deref(), Some("bd-1"));
+        let obj = json!({"id": "bd-1.2", "title": "leaf", "parent": {"id": "bd-1"}});
+        assert_eq!(issue_list(&obj)[0].parent.as_deref(), Some("bd-1"));
+        let dep = json!({
+            "id": "bd-1.2",
+            "title": "leaf",
+            "dependencies": [{"issue_id": "bd-1.2", "depends_on_id": "bd-1", "type": "parent-child"}]
+        });
+        assert_eq!(issue_list(&dep)[0].parent.as_deref(), Some("bd-1"));
+    }
+
+    #[test]
+    fn leaves_drop_parents_of_ready_children() {
+        let issues = issue_list(&json!([
+            {"id": "bd-1", "title": "epic"},
+            {"id": "bd-1.2", "title": "leaf", "parent": "bd-1"},
+            {"id": "bd-9", "title": "solo"}
+        ]));
+        let ids: Vec<&str> = leaves(&issues).into_iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["bd-1.2", "bd-9"]);
     }
 }

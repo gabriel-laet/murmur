@@ -110,8 +110,16 @@ impl Store {
         self.task_list(&["todo"]).map(|t| t.len()).unwrap_or(0)
     }
 
+    /// True when another open task id is a dotted child (`pal-1` vs `pal-1.2`).
+    pub fn is_umbrella(id: &str, open_ids: &[String]) -> bool {
+        let prefix = format!("{id}.");
+        open_ids.iter().any(|other| other.starts_with(&prefix))
+    }
+
     /// Grab the oldest todo task. Atomic under contention: the rename either
     /// succeeds (it's yours) or fails (someone else won; try the next one).
+    /// Parent ids with dotted children on the board are skipped so a worker
+    /// cannot swallow the epic.
     pub fn task_take(&self, name: &str) -> Result<Option<Task>> {
         store::valid_name(name)?;
         self.task_init()?;
@@ -122,10 +130,23 @@ impl Store {
             .map(|e| e.path())
             .collect();
         paths.sort();
+        // Include doing: a parent stays an epic while any child is in flight.
+        let open_ids: Vec<String> = self
+            .task_list(&["todo", "doing"])?
+            .into_iter()
+            .map(|(_, t)| t.id)
+            .collect();
         for path in paths {
             let Some(file_name) = path.file_name() else {
                 continue;
             };
+            let id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if Self::is_umbrella(id, &open_ids) {
+                continue;
+            }
             let dest = self.task_dir("doing").join(file_name);
             if fs::rename(&path, &dest).is_err() {
                 continue; // lost the race for this one
@@ -256,5 +277,19 @@ impl Store {
                 n
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Store;
+
+    #[test]
+    fn umbrella_is_a_prefix_of_an_open_child() {
+        let open = ["bd-1".into(), "bd-1.2".into(), "bd-2".into()];
+        assert!(Store::is_umbrella("bd-1", &open));
+        assert!(!Store::is_umbrella("bd-1.2", &open));
+        assert!(!Store::is_umbrella("bd-2", &open));
+        assert!(!Store::is_umbrella("bd-10", &open), "bd-10 is not bd-1.*");
     }
 }

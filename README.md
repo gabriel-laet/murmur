@@ -96,7 +96,15 @@ murmur start bd-a1b2 --kind grok             # lead + worker
 murmur start bd-a1b2 --kind claude,codex=2   # mixed: claude leads, codex works
 murmur start bd-a1b2 --kind grok --worktree  # one git worktree per agent
 murmur start "fix claim TTLs" --no-herdr     # board only; prints how to join
+murmur stop                                  # close that herd's workspace + worktrees
 ```
+
+`start` writes `.murmur/herd.json` and joins every local agent so `murmur who`
+sees them immediately. `stop` closes the Herdr workspace (from a pane that
+is not inside it), drops presence, and removes the worktrees `--worktree`
+created. Only *leaf* ready beads land on the board — a parent with ready
+children is skipped, and `task take` also skips an id that has dotted
+children still open, so a worker cannot swallow the epic.
 
 With `--worktree`, each agent works in its own worktree (a sibling of the
 repo, branch `herd/<slug>/<name>`) and never touches your checkout; panes
@@ -239,6 +247,9 @@ murmur task add|list|take|done|drop   # shared work queue
 murmur task sync beads                # reconcile the board with beads (bd)
 murmur start [goal|bd-a1b2]           # bead → board → Herdr herd
                                       #   --kind claude,codex=2 mixes the fleet
+murmur stop                           # close the last herd's workspace + worktrees
+murmur status                         # who is up + the open board
+murmur poke <name> <msg>              # prompt a live Herdr agent by murmur name
 murmur secret exec NAME=<ref> -- cmd  # resolve secret refs into a command's env
 murmur secret resolve <ref>           # resolve to stdout (prefer exec)
 murmur log [-n N]          # recent message history

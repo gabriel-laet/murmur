@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use crate::beads;
 use crate::cloud;
 use crate::herdr;
-use crate::store::Store;
+use crate::store::{HerdSnap, Store};
 use crate::tasks::Task;
 
 pub struct Opts {
@@ -126,6 +126,8 @@ pub fn run(opts: Opts) -> Result<()> {
     let mut herd: Vec<(String, String, String)> = Vec::new(); // (name, kind, pane)
     let mut last_pane: Option<String> = None; // last *local* pane, for splits
     let mut cloud_repo: Option<cloud::RepoRef> = None;
+    let mut workspace_id = String::new();
+    let mut worktrees: Vec<String> = Vec::new();
 
     for (i, (base, kind)) in roles.iter().enumerate() {
         // A cloud kind never gets a pane or a worktree: it launches on the
@@ -171,6 +173,7 @@ pub fn run(opts: Opts) -> Result<()> {
             Some(repo) => match add_worktree(repo, &herd_slug, &name) {
                 Ok((dir, branch)) => {
                     println!("tree   {name}  {}  ({branch})", dir.display());
+                    worktrees.push(dir.display().to_string());
                     (dir, Some(branch))
                 }
                 Err(e) => {
@@ -183,6 +186,7 @@ pub fn run(opts: Opts) -> Result<()> {
         let murmur_dir = repo.is_some().then_some(shared_store.as_path());
         let pane = if last_pane.is_none() {
             let (ws, root) = herdr::create_workspace(&label, &pane_cwd)?;
+            workspace_id = ws.clone();
             if !ws.is_empty() {
                 println!("space  {label}  {ws}  root {root}");
             } else {
@@ -211,6 +215,29 @@ pub fn run(opts: Opts) -> Result<()> {
         bail!("herdr is up but no agent started — check `herdr agent start --help`");
     }
 
+    for (name, kind, _) in &herd {
+        if !cloud::is_cloud(kind) {
+            let _ = store.touch(name);
+        }
+    }
+    store.herd_save(&HerdSnap {
+        workspace_id: workspace_id.clone(),
+        label: label.clone(),
+        agents: herd.iter().map(|(n, _, _)| n.clone()).collect(),
+        repo: repo
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        worktrees,
+        slug: herd_slug,
+    })?;
+
+    if beads::available() {
+        if let Err(e) = beads::sync() {
+            eprintln!("murmur: beads sync failed ({e})");
+        }
+    }
+
     println!(
         "\nherd   {}  — they share this .murmur; mail wakes idle panes after `murmur setup`",
         herd.iter()
@@ -219,6 +246,68 @@ pub fn run(opts: Opts) -> Result<()> {
             .join(", ")
     );
     println!("watch  murmur watch");
+    println!("stop   murmur stop");
+    Ok(())
+}
+
+/// Tear down the last `murmur start` herd: close its Herdr workspace,
+/// drop presence, and remove the worktrees start created. Run this from
+/// a pane that is *not* inside that workspace.
+pub fn stop() -> Result<()> {
+    let store = Store::locate()?;
+    let snap = store
+        .herd_load()?
+        .context("no running herd (.murmur/herd.json missing) — start one first")?;
+
+    if let Ok(here) = std::env::var("HERDR_WORKSPACE_ID") {
+        if !snap.workspace_id.is_empty() && here == snap.workspace_id {
+            bail!(
+                "won't close workspace {} from inside it — run murmur stop from another workspace",
+                snap.workspace_id
+            );
+        }
+    }
+
+    if !snap.workspace_id.is_empty() && herdr::available() {
+        match herdr::close_workspace(&snap.workspace_id) {
+            Ok(()) => println!("closed workspace {}", snap.workspace_id),
+            Err(e) => eprintln!(
+                "murmur: could not close workspace {}: {e}",
+                snap.workspace_id
+            ),
+        }
+    }
+
+    for path in &snap.worktrees {
+        if snap.repo.is_empty() {
+            break;
+        }
+        let out = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", path])
+            .current_dir(&snap.repo)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => println!("removed worktree {path}"),
+            Ok(o) => eprintln!(
+                "murmur: git worktree remove {path}: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => eprintln!("murmur: git worktree remove {path}: {e}"),
+        }
+    }
+
+    for name in &snap.agents {
+        let _ = store.leave(name);
+    }
+    store.herd_clear()?;
+    println!(
+        "stopped herd {}",
+        if snap.label.is_empty() {
+            "(unnamed)"
+        } else {
+            snap.label.as_str()
+        }
+    );
     Ok(())
 }
 
@@ -463,16 +552,18 @@ fn brief(
     let role = if lead {
         format!(
             "You are lead. Plan the work: break it into 2–5 murmur tasks if needed \
-             (`murmur task add \"...\" --as {name}`), take {tid} yourself or hand pieces to peers \
-             (`murmur send <peer> \"...\" --as {name}`). When a slice is done: \
+             (`murmur task add \"...\" --as {name}`), take a *leaf* yourself or hand pieces to peers \
+             (`murmur send <peer> \"...\" --as {name}`). Never take a parent/epic that has dotted \
+             children on the board — `murmur task take` skips those. When a slice is done: \
              `murmur task done <id> --as {name}`. Do not wait for the human; poll \
-             workers and merge when they report green.",
+             workers and merge when they report green. Goal bead is {tid}.",
             tid = task.id
         )
     } else {
         format!(
-            "You are a worker. First command: `murmur inbox --as {name}`. Then take work \
-             (`murmur task take --as {name}`), talk to lead (`murmur send lead \"...\" --as {name}`). \
+            "You are a worker. First command: `murmur inbox --as {name}`. Then take a leaf \
+             (`murmur task take --as {name}` — parent epics with dotted children are skipped), \
+             talk to lead (`murmur send lead \"...\" --as {name}`). \
              Don't edit files someone else has claimed (`murmur claims`). Do not wait for the human."
         )
     };

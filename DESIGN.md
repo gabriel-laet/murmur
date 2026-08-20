@@ -52,7 +52,8 @@ herds: `--kind claude,codex=2`.
 Multiplexers are views, not competitors: murmur owns durable state; a TUI
 should consume `murmur watch --json`, not scrape terminals. `murmur start`
 is userland policy — pull a bead, ask herdr for panes, deliver the brief,
-then get out of the way. Identity is the seam: a herdr pane's agent name
+then get out of the way. `murmur stop` reads `.murmur/herd.json` and closes
+that workspace (never from inside it). Identity is the seam: a herdr pane's agent name
 *is* the murmur name, and the herdr plugin nudges idle panes (mail first,
 ready beads when the inbox is empty). `--worktree` extends the same policy
 to git: one worktree per agent (isolation instead of claims), the lead's

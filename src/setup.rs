@@ -373,7 +373,8 @@ fn agents_md_section() -> String {
         `murmur send <peer> \"...\" --as <name>` (`'*'` broadcasts;\n\
         `--reply` blocks for an answer). `murmur who` lists everyone.\n\
         - **Shared work queue.** `murmur task take --as <name>` atomically assigns you\n\
-        the oldest open task; finish with `murmur task done <id> --as <name>` or put it\n\
+        the oldest *leaf* open task (parent epics with dotted children stay on the\n\
+        board); finish with `murmur task done <id> --as <name>` or put it\n\
         back with `murmur task drop <id> --as <name>`. `murmur task list` shows the board.\n\
         - **Don't stomp on claimed files.** `murmur claims` lists advisory file claims;\n\
         claim before editing contested files with `murmur claim <path> --as <name>` and\n\

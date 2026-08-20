@@ -192,6 +192,11 @@ pub fn create_workspace(label: &str, cwd: &Path) -> Result<(String, String)> {
     Ok((ws, pane))
 }
 
+pub fn close_workspace(id: &str) -> Result<()> {
+    call(&["workspace", "close", id])?;
+    Ok(())
+}
+
 /// Herdr's `--kind` names are not always the executable. `cursor-agent` is
 /// the binary; Herdr wants `cursor`. Cloud kinds never reach this helper.
 pub fn herdr_kind(kind: &str) -> &str {
@@ -410,7 +415,10 @@ fn nudge_ready_beads(name: &str, cwd: Option<&Path>, state_dir: &Path) {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default();
-    let fresh: Vec<_> = ready.iter().filter(|i| !seen.contains(&i.id)).collect();
+    let fresh: Vec<_> = crate::beads::leaves(&ready)
+        .into_iter()
+        .filter(|i| !seen.contains(&i.id))
+        .collect();
     if fresh.is_empty() {
         return;
     }

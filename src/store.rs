@@ -90,6 +90,24 @@ pub enum ClaimResult {
     Held(Claim),
 }
 
+/// Snapshot of the last `murmur start` herd, so `murmur stop` can tear it
+/// down without the human remembering pane ids.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HerdSnap {
+    #[serde(default)]
+    pub workspace_id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub agents: Vec<String>,
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub worktrees: Vec<String>,
+    #[serde(default)]
+    pub slug: String,
+}
+
 pub struct Store {
     root: PathBuf,
 }
@@ -637,6 +655,34 @@ impl Store {
             }
         }
         Ok((agents_removed, claims_removed))
+    }
+
+    // ---- herd snapshot (userland start/stop) ----
+
+    fn herd_path(&self) -> PathBuf {
+        self.root.join("herd.json")
+    }
+
+    pub fn herd_save(&self, snap: &HerdSnap) -> Result<()> {
+        self.init()?;
+        let tmp = self.root.join("tmp").join(format!("herd-{}", now_millis()));
+        fs::write(&tmp, serde_json::to_vec(snap)?)?;
+        fs::rename(&tmp, self.herd_path())?;
+        Ok(())
+    }
+
+    pub fn herd_load(&self) -> Result<Option<HerdSnap>> {
+        let path = self.herd_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path)?;
+        Ok(serde_json::from_slice(&bytes).ok())
+    }
+
+    pub fn herd_clear(&self) -> Result<()> {
+        let _ = fs::remove_file(self.herd_path());
+        Ok(())
     }
 }
 

@@ -1133,6 +1133,195 @@ esac
     assert!(out.status.success(), "rerun: {}", stderr(&out));
 }
 
+fn write_task(store: &PathBuf, state: &str, id: &str, title: &str) {
+    let dir = store.join("tasks").join(state);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{id}.json")),
+        format!(
+            r#"{{"id":"{id}","title":"{title}","body":"","by":"beads","ts":1,"external_id":"{id}"}}"#
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn task_take_skips_umbrella_when_children_are_open() {
+    let store = fresh_dir("umbrella");
+    murmur(&store, &["join", "lead"]);
+    write_task(&store, "todo", "bd-1", "epic");
+    write_task(&store, "todo", "bd-1.2", "leaf");
+    let out = murmur(&store, &["task", "take", "--as", "w1", "--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let task: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(task["id"], "bd-1.2", "leaf, not the epic: {}", stdout(&out));
+
+    // child now doing — parent still skipped
+    let out = murmur(&store, &["task", "take", "--as", "w2"]);
+    assert!(!out.status.success(), "parent must stay: {}", stdout(&out));
+    assert!(stderr(&out).contains("no open tasks"));
+}
+
+#[test]
+fn beads_sync_skips_parents_of_ready_children() {
+    let store = fresh_dir("beads-leaves");
+    let base = store.parent().unwrap();
+    let log = base.join("leaves-bd.log");
+    let stub = {
+        use std::os::unix::fs::PermissionsExt;
+        let path = base.join("bd-leaves.sh");
+        std::fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1" in
+  ready) echo '[{{"id":"bd-1","title":"Epic"}},{{"id":"bd-1.2","title":"Leaf","parent":"bd-1"}}]' ;;
+  *) echo '{{}}' ;;
+esac
+"#,
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let out = Command::new(bin())
+        .args(["task", "sync", "beads"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_BEADS", &stub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let list = stdout(&murmur(&store, &["task", "list"]));
+    let ids: Vec<&str> = list
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .collect();
+    assert!(ids.contains(&"bd-1.2"), "{list}");
+    assert!(
+        !ids.contains(&"bd-1"),
+        "epic must not land when a child is ready: {list}"
+    );
+}
+
+#[test]
+fn start_joins_agents_and_writes_herd_snap() {
+    let store = fresh_dir("start-snap");
+    let base = store.parent().unwrap();
+    let log = base.join("snap-herdr.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "status --json") echo '{{"server":{{"running":true}}}}' ;;
+  "agent list") echo '{{"result":{{"agents":[]}}}}' ;;
+  "workspace create") echo '{{"result":{{"workspace":{{"workspace_id":"w9"}},"root_pane":{{"pane_id":"w9:p0"}}}}}}' ;;
+  "pane split") echo '{{"result":{{"pane":{{"pane_id":"w9:p1"}}}}}}' ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    let bd = fake_bd(base, &base.join("snap-bd.log"));
+    let out = Command::new(bin())
+        .args(["start", "bd-a1b2", "--kind", "grok", "--workers", "2"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .env("MURMUR_BEADS", &bd)
+        .env_remove("HERDR_ENV")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("stop   murmur stop"),
+        "{}",
+        stdout(&out)
+    );
+    let snap: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(store.join("herd.json")).unwrap()).unwrap();
+    assert_eq!(snap["workspace_id"], "w9");
+    assert_eq!(snap["agents"][0], "lead");
+    assert_eq!(snap["agents"][1], "w1");
+    let who = stdout(&murmur(&store, &["who"]));
+    assert!(who.contains("lead"), "{who}");
+    assert!(who.contains("w1"), "{who}");
+}
+
+#[test]
+fn stop_closes_workspace_and_clears_the_snap() {
+    let store = fresh_dir("stop-herd");
+    let base = store.parent().unwrap();
+    murmur(&store, &["join", "lead"]);
+    murmur(&store, &["join", "w1"]);
+    std::fs::write(
+        store.join("herd.json"),
+        r#"{"workspace_id":"w9","label":"bd-a1b2","agents":["lead","w1"]}"#,
+    )
+    .unwrap();
+    let log = base.join("stop-herdr.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "status --json") echo '{{"server":{{"running":true}}}}' ;;
+  "workspace close") echo '{{"result":{{}}}}' ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    let out = Command::new(bin())
+        .args(["stop"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .env_remove("HERDR_ENV")
+        .env_remove("HERDR_WORKSPACE_ID")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("closed workspace w9"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(!store.join("herd.json").exists());
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("workspace close w9"), "{calls}");
+    let who = stdout(&murmur(&store, &["who"]));
+    assert!(!who.contains("lead"), "presence dropped: {who}");
+}
+
+#[test]
+fn stop_refuses_to_close_the_current_workspace() {
+    let store = fresh_dir("stop-self");
+    murmur(&store, &["join", "lead"]);
+    std::fs::write(
+        store.join("herd.json"),
+        r#"{"workspace_id":"w9","label":"bd-a1b2","agents":["lead"]}"#,
+    )
+    .unwrap();
+    let out = Command::new(bin())
+        .args(["stop"])
+        .env("MURMUR_DIR", &store)
+        .env("HERDR_WORKSPACE_ID", "w9")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("from inside"), "{}", stderr(&out));
+    assert!(
+        store.join("herd.json").exists(),
+        "snap kept when stop aborts"
+    );
+}
+
 #[test]
 fn herdr_idle_wake_prompts_once_per_message() {
     let store = fresh_dir("wake");

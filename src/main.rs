@@ -28,6 +28,7 @@ Identity comes from --as <name>, $MURMUR_AGENT, or the Herdr pane name.
 QUICK START:
     murmur setup                           # wire every installed harness + Herdr plugin
     murmur start bd-a1b2 --kind grok       # bead → board → Herdr herd
+    murmur stop                            # close that herd's workspace + worktrees
     murmur send frontend \"API is ready\"    # message a peer (delivered even if they're busy)
     murmur send '*' \"rebasing main\"        # broadcast to everyone
     murmur send db \"schema ok?\" --reply    # ask and block for the answer
@@ -193,6 +194,9 @@ enum Command {
         #[arg(long)]
         worktree: bool,
     },
+    /// Tear down the last herd: close its Herdr workspace, drop presence,
+    /// remove worktrees `start --worktree` created
+    Stop,
     /// Check the fleet roster against what this machine can launch right now:
     /// herdr up, kind binaries on PATH, cloud keys present
     Doctor,
@@ -355,6 +359,7 @@ fn run() -> anyhow::Result<()> {
             no_herdr,
             worktree,
         }),
+        Command::Stop => start::stop(),
         Command::Doctor => doctor::run(),
         Command::Cloud { cmd } => match cmd {
             CloudCmd::Status { id } => cloud::status(&id),
