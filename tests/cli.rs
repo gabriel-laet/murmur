@@ -433,7 +433,10 @@ fn beads_sync_pulls_pushes_and_stays_idempotent() {
     let out = sync();
     assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
     let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(calls.contains("close bd-a1b2"), "closed in beads: {calls}");
+    assert!(
+        calls.contains("close bd-a1b2 --reason"),
+        "close reason is a flag, not a positional id: {calls}"
+    );
     assert!(calls.contains("worker-1 via murmur"), "{calls}");
 }
 

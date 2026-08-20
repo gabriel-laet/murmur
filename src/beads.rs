@@ -147,7 +147,8 @@ pub fn sync() -> Result<()> {
                 call(&args)?;
             }
             "closed" => {
-                call(&["close", &bead_id, &attribution(&state, &task)])?;
+                let reason = attribution(&state, &task);
+                call(&["close", &bead_id, "--reason", &reason])?;
             }
             _ => {
                 call(&["update", &bead_id, "--status", "open"])?;
