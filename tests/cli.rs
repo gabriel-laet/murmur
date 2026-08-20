@@ -1357,6 +1357,43 @@ fn bd_human_text_on_mutations_is_success() {
 }
 
 #[test]
+fn poke_revives_a_done_agent_before_prompting() {
+    let store = fresh_dir("poke-revive");
+    let base = store.parent().unwrap();
+    let log = base.join("poke-herdr.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "agent get") echo '{{"result":{{"agent":{{"name":"w1","agent":"claude","pane_id":"w1:p3","agent_status":"done"}}}}}}' ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    let out = Command::new(bin())
+        .args(["poke", "w1", "pick up the follow-ups"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &stub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("revived w1"), "{}", stdout(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let start_at = calls.find("agent start w1 --kind claude --pane w1:p3");
+    let prompt_at = calls.find("agent prompt w1 pick up the follow-ups");
+    assert!(
+        start_at.is_some(),
+        "must restart the done pane first: {calls}"
+    );
+    assert!(prompt_at.is_some(), "{calls}");
+    assert!(start_at < prompt_at, "revive before prompt: {calls}");
+}
+
+#[test]
 fn start_at_an_epic_boards_the_leaves() {
     let store = fresh_dir("start-epic");
     let base = store.parent().unwrap();

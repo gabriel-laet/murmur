@@ -199,11 +199,36 @@ pub fn close_workspace(id: &str) -> Result<()> {
 
 /// Herdr's `--kind` names are not always the executable. `cursor-agent` is
 /// the binary; Herdr wants `cursor`. Cloud kinds never reach this helper.
+/// This table and `kind_aliases` are THE kind-name map — add new pairs
+/// here, nowhere else.
 pub fn herdr_kind(kind: &str) -> &str {
     match kind {
         "cursor-agent" => "cursor",
         other => other,
     }
+}
+
+/// Other names the same agent answers to, for PATH probes and the like.
+pub fn kind_aliases(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "cursor" => &["cursor-agent"],
+        "cursor-agent" => &["cursor"],
+        _ => &[],
+    }
+}
+
+/// Live info for a named agent: (status, kind, pane_id). None when Herdr
+/// doesn't know the name (or isn't reachable).
+pub fn agent_info(name: &str) -> Option<(String, String, String)> {
+    let v = call(&["agent", "get", name]).ok()?;
+    let node = v
+        .pointer("/result/agent")
+        .or_else(|| v.pointer("/result/pane"))?;
+    Some((
+        str_field(node, "agent_status").unwrap_or_default(),
+        str_field(node, "agent").unwrap_or_default(),
+        str_field(node, "pane_id").unwrap_or_default(),
+    ))
 }
 
 pub fn start_agent(name: &str, kind: &str, pane: &str) -> Result<()> {

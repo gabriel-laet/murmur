@@ -430,8 +430,18 @@ pub fn status() -> Result<()> {
     task_list(false, false)
 }
 
-/// Deliver a prompt into a live Herdr agent by name.
+/// Deliver a prompt into a live Herdr agent by name. A pane whose model
+/// already finished (`done`/`exited`) is revived first — a poke must reach
+/// a listening prompt or fail loudly, never report success on a corpse.
 pub fn poke(target: &str, text: &str) -> Result<()> {
+    if let Some((status, kind, pane)) = crate::herdr::agent_info(target) {
+        let dead = matches!(status.as_str(), "done" | "exited" | "stopped" | "error");
+        if dead && !kind.is_empty() && !pane.is_empty() {
+            crate::herdr::start_agent(target, &kind, &pane)
+                .with_context(|| format!("{target} is {status} and would not restart"))?;
+            println!("revived {target} ({kind})");
+        }
+    }
     crate::herdr::prompt(target, text)?;
     println!("prompted {target}");
     Ok(())
