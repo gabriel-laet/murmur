@@ -163,6 +163,14 @@ fn call_tool(tool: &str, args: &Value, name: &str) -> Result<String> {
         }
         "take_task" => {
             let veto = crate::beads::take_veto(&store);
+            let id = str_arg("id");
+            if !id.is_empty() {
+                let task = store.task_take_id(name, &id, &veto)?;
+                return Ok(format!(
+                    "took task {}: {}\nmark it finished with complete_task when done",
+                    task.id, task.title
+                ));
+            }
             match store.task_take(name, &veto)? {
                 Some(task) => Ok(format!(
                     "took task {}: {}{}\nmark it finished with complete_task when done",
@@ -295,8 +303,13 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "take_task",
-            "description": "Atomically take the oldest open task from the shared board. Exactly one agent wins a contested task.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "description": "Atomically take a task from the shared board: pass id for the specific task your lead assigned (preferred), or omit it for the oldest open leaf. Exactly one agent wins a contested task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Task id (prefix is enough). Omit only when the board is yours to pick from." }
+                }
+            }
         },
         {
             "name": "complete_task",

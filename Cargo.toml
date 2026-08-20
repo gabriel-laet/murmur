@@ -1,6 +1,6 @@
 [package]
 name = "murmur"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "The communication kernel for AI agents — any agent, any harness; a directory of files, not a daemon"
 license = "MIT"

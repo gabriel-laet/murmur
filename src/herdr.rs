@@ -231,6 +231,63 @@ pub fn agent_info(name: &str) -> Option<(String, String, String)> {
     ))
 }
 
+/// The agent name Herdr actually *started* in this pane — never the
+/// derived `herdr-<pane>` fallback, so a human's plain shell is None.
+pub fn started_agent_name() -> Option<String> {
+    if !inside() {
+        return None;
+    }
+    let pane = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|s| !s.is_empty())?;
+    let info = call(&["agent", "get", &pane]).ok()?;
+    let node = info.pointer("/result/agent")?;
+    str_field(node, "name").filter(|n| store::valid_name(n).is_ok())
+}
+
+/// Block until the pane's agent is actually accepting prompts, so the
+/// first brief isn't eaten by a workspace-trust dialog or a startup hook
+/// review. `interactive_ready` is the definitive signal when this Herdr
+/// reports it; kinds that never report it settle for a calm status. When
+/// no signal shows up at all (older Herdr, stub), give up quickly and let
+/// the caller prompt anyway. Returns whether readiness was confirmed.
+pub fn wait_prompt_ready(pane: &str) -> bool {
+    let timeout_ms: u64 = std::env::var("MURMUR_READY_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(90_000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut no_signal = 0;
+    loop {
+        if let Ok(info) = call(&["agent", "get", pane]) {
+            let node = info
+                .pointer("/result/agent")
+                .or_else(|| info.pointer("/result/pane"));
+            let ready = node
+                .and_then(|n| n.get("interactive_ready"))
+                .and_then(|v| v.as_bool());
+            let status = node
+                .and_then(|n| str_field(n, "agent_status"))
+                .unwrap_or_default();
+            match ready {
+                Some(true) => return true,
+                Some(false) => no_signal = 0, // definitive: keep waiting
+                None if matches!(status.as_str(), "idle" | "working") => return true,
+                None => no_signal += 1,
+            }
+        } else {
+            no_signal += 1;
+        }
+        if no_signal >= 2 {
+            return false; // this Herdr gives us nothing to wait on
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 /// A finished pane (`done`/`exited`) has no model listening: restart the
 /// same kind in the same pane so a prompt lands in a live one. Returns the
 /// kind restarted, or None when the agent was alive (or unknown to Herdr).

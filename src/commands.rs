@@ -134,9 +134,14 @@ pub fn who(json: bool) -> Result<()> {
     let me = store.node_name()?;
     let herdr_live = crate::herdr::live_names();
     for a in agents {
+        // Idle is not dead: agents touch presence per *command*, and the
+        // recorded pid is usually a finished CLI invocation. Recent
+        // last_seen means "between commands", not "gone".
         let status = if a.node.is_empty() || a.node == me {
             if store::pid_alive(a.pid) || herdr_live.contains(&a.name) {
                 "up"
+            } else if store::now_secs().saturating_sub(a.last_seen) < 900 {
+                "idle"
             } else {
                 "gone"
             }
@@ -363,10 +368,27 @@ pub fn task_list(all: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn task_take(name: Option<String>, json: bool) -> Result<()> {
+pub fn task_take(id: Option<String>, name: Option<String>, json: bool) -> Result<()> {
     let name = identity(name)?;
     let store = Store::locate()?;
     let veto = crate::beads::take_veto(&store);
+    // A specific id is the primary path — the lead assigns, the worker
+    // takes by name. Oldest-open is the fallback for boards that are
+    // genuinely a free-for-all.
+    if let Some(id) = id {
+        let task = store.task_take_id(&name, &id, &veto)?;
+        if json {
+            println!("{}", serde_json::to_string(&task)?);
+        } else {
+            println!("took task {}", task.id);
+            println!("  {}", task.title);
+            println!(
+                "  when finished: murmur task done {} --as {}",
+                task.id, name
+            );
+        }
+        return Ok(());
+    }
     match store.task_take(&name, &veto)? {
         Some(task) => {
             if json {
@@ -413,13 +435,18 @@ pub fn task_drop(id: &str, name: Option<String>) -> Result<()> {
     Ok(())
 }
 
-pub fn task_sync(backend: &str) -> Result<()> {
+pub fn task_sync(
+    backend: &str,
+    parent: Option<String>,
+    label: Option<String>,
+    all: bool,
+) -> Result<()> {
     anyhow::ensure!(
         backend == "beads",
         "unknown task backend '{}' (supported: beads)",
         backend
     );
-    crate::beads::sync()
+    crate::beads::sync(&crate::beads::SyncOpts { parent, label, all })
 }
 
 /// One-screen snapshot: who is up, what is on the board.
@@ -474,13 +501,21 @@ pub fn secret_exec(pairs: Vec<String>, command: Vec<String>) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-pub fn clean(all: bool) -> Result<()> {
+pub fn clean(all: bool, stale: bool, age_hours: u64) -> Result<()> {
     let store = Store::locate()?;
     if all {
         if store.root().is_dir() {
             std::fs::remove_dir_all(store.root())?;
         }
         println!("removed {}", store.root().display());
+        return Ok(());
+    }
+    if stale {
+        let (agents, tasks, claims) = store.clean_stale(age_hours.max(1) * 3600)?;
+        println!(
+            "removed {} stale agents, {} old done tasks, {} expired claims (bus untouched)",
+            agents, tasks, claims
+        );
         return Ok(());
     }
     let (agents, claims) = store.clean()?;

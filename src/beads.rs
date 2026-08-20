@@ -27,6 +27,7 @@ use std::process::Command;
 use crate::store::Store;
 use crate::tasks::{Task, STATES};
 
+#[derive(Clone)]
 pub struct Issue {
     pub id: String,
     pub title: String,
@@ -34,6 +35,7 @@ pub struct Issue {
     pub parent: Option<String>,
     pub status: String,
     pub assignee: Option<String>,
+    pub labels: Vec<String>,
 }
 
 impl Issue {
@@ -118,14 +120,41 @@ pub fn ensure_task(store: &Store, issue: &Issue) -> Result<(Task, bool)> {
     Ok((existing, false))
 }
 
-pub fn sync() -> Result<()> {
+#[derive(Default)]
+pub struct SyncOpts {
+    /// Pull only this bead and its descendants (within the ready set).
+    pub parent: Option<String>,
+    /// Pull only beads carrying this label.
+    pub label: Option<String>,
+    /// Pull everything even when the ready set is large.
+    pub all: bool,
+}
+
+/// Above this many ready leaves, an unscoped pull is almost never what a
+/// herd wants — one agent following a generic "sync beads" line must not
+/// flood the board with a whole tracker. Push and authority still run.
+const PULL_GUARD: usize = 20;
+
+pub fn sync(opts: &SyncOpts) -> Result<()> {
     let store = Store::locate()?;
 
     let issues = ready()?;
+    let scoped = scope(&issues, opts);
+    let takeable = leaves(&scoped);
+    let unscoped = opts.parent.is_none() && opts.label.is_none();
+    let guarded = unscoped && !opts.all && takeable.len() > PULL_GUARD;
     let mut pulled = 0;
-    for issue in leaves(&issues) {
-        if store.task_import(task_from_issue(issue))? {
-            pulled += 1;
+    if guarded {
+        println!(
+            "beads: NOT pulling {} ready leaves — scope with --parent <epic> or --label <l>, \
+             or force with --all",
+            takeable.len()
+        );
+    } else {
+        for issue in takeable {
+            if store.task_import(task_from_issue(issue))? {
+                pulled += 1;
+            }
         }
     }
 
@@ -263,6 +292,37 @@ pub fn take_veto(store: &Store) -> std::collections::HashSet<String> {
     veto
 }
 
+/// Restrict the ready set to a scope: descendants of `parent` (walking
+/// parent links within the ready set, the parent itself included) and/or
+/// a label. No scope returns everything.
+fn scope<'a>(issues: &'a [Issue], opts: &SyncOpts) -> Vec<Issue> {
+    let by_id: std::collections::HashMap<&str, &Issue> =
+        issues.iter().map(|i| (i.id.as_str(), i)).collect();
+    let under = |mut id: &'a str, root: &str| -> bool {
+        loop {
+            if id == root {
+                return true;
+            }
+            match by_id.get(id).and_then(|i| i.parent.as_deref()) {
+                Some(p) => id = p,
+                None => return false,
+            }
+        }
+    };
+    issues
+        .iter()
+        .filter(|i| match &opts.parent {
+            Some(root) => under(&i.id, root),
+            None => true,
+        })
+        .filter(|i| match &opts.label {
+            Some(l) => i.labels.iter().any(|x| x == l),
+            None => true,
+        })
+        .cloned()
+        .collect()
+}
+
 /// Ready beads that are not the parent of another ready bead. Workers
 /// should take leaves; the epic stays in beads until the children close.
 pub fn leaves(issues: &[Issue]) -> Vec<&Issue> {
@@ -346,6 +406,19 @@ fn parse_issue(v: &Value) -> Option<Issue> {
         })
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+    let labels = v
+        .get("labels")
+        .and_then(|l| l.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| {
+                    x.as_str()
+                        .or_else(|| x.get("name").and_then(|n| n.as_str()))
+                        .map(|s| s.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Some(Issue {
         id: id.to_string(),
         title: title.to_string(),
@@ -353,6 +426,7 @@ fn parse_issue(v: &Value) -> Option<Issue> {
         parent: parse_parent(v),
         status: status.to_string(),
         assignee,
+        labels,
     })
 }
 

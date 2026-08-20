@@ -55,13 +55,119 @@ pub fn find() -> Option<PathBuf> {
 }
 
 /// The roster as brief text: trimmed, capped, None when absent or empty.
+/// The observed-usage tally rides along so a planning lead sizes slices
+/// against what this machine has already burned today.
 pub fn for_brief() -> Option<String> {
     let text = fs::read_to_string(find()?).ok()?;
     let text = text.trim();
     if text.is_empty() {
         return None;
     }
-    Some(truncate(text, BRIEF_CAP))
+    let mut out = truncate(text, BRIEF_CAP);
+    if let Some(usage) = usage_line() {
+        out.push_str(&format!(
+            "\n\nAgent starts on this machine (last 24h): {usage} — weigh remaining \
+             quota/subscription when sizing the herd."
+        ));
+    }
+    Some(out)
+}
+
+// ---- observed usage ----
+//
+// Murmur cannot see a provider's quota, but it can count what it launched.
+// The tally is machine-level (subscriptions are per account, not per repo)
+// and append-only; `murmur fleet` and the lead's brief read it. Estimating
+// remaining capacity stays judgment — the file only supplies the facts.
+
+fn usage_file() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("MURMUR_USAGE_FILE") {
+        return Some(PathBuf::from(p));
+    }
+    let base = std::env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| PathBuf::from(h).join(".local/state"))
+        })?;
+    Some(base.join("murmur").join("usage.jsonl"))
+}
+
+/// Record one agent start (local pane or cloud launch). Best-effort.
+pub fn record_start(kind: &str) {
+    let Some(path) = usage_file() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let line = format!(
+        "{{\"ts\":{},\"kind\":{}}}\n",
+        crate::store::now_secs(),
+        serde_json::to_string(kind).unwrap_or_else(|_| "\"?\"".into())
+    );
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Starts per kind within the last `secs`, most-used first.
+pub fn usage_since(secs: u64) -> Vec<(String, usize)> {
+    let Some(path) = usage_file() else {
+        return Vec::new();
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let cutoff = crate::store::now_secs().saturating_sub(secs);
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let ts = v.get("ts").and_then(|x| x.as_u64()).unwrap_or(0);
+        let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("");
+        if ts >= cutoff && !kind.is_empty() {
+            *counts.entry(kind.to_string()).or_default() += 1;
+        }
+    }
+    let mut out: Vec<(String, usize)> = counts.into_iter().collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    out
+}
+
+/// "claude 3, codex 12" for the last 24h, None when nothing was started.
+pub fn usage_line() -> Option<String> {
+    let u = usage_since(86_400);
+    if u.is_empty() {
+        return None;
+    }
+    Some(
+        u.iter()
+            .map(|(k, n)| format!("{k} {n}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+/// `murmur fleet` — the roster plus what this machine actually launched.
+pub fn show() -> Result<()> {
+    match find() {
+        Some(path) => println!("roster {}", path.display()),
+        None => println!("roster FLEET.md not found — `murmur setup` seeds one"),
+    }
+    for (label, secs) in [("24h", 86_400u64), ("7d", 604_800)] {
+        let u = usage_since(secs);
+        if u.is_empty() {
+            println!("usage  {label}: no agent starts recorded");
+        } else {
+            let s: Vec<String> = u.iter().map(|(k, n)| format!("{k} {n}")).collect();
+            println!("usage  {label}: {}", s.join(", "));
+        }
+    }
+    println!("note   counts are murmur-observed starts, not provider quota — judgment stays yours");
+    Ok(())
 }
 
 /// The kind column of the roster table, best-effort — `murmur doctor`'s

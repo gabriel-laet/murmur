@@ -165,6 +165,40 @@ impl Store {
         Ok(None)
     }
 
+    /// Take a *specific* open task by id prefix — what a lead hands out and
+    /// a worker on a scoped brief asks for, instead of "whatever is oldest".
+    /// Same atomic rename, same veto: an epic or a bead the tracker no
+    /// longer offers is refused by name, not skipped silently.
+    pub fn task_take_id(
+        &self,
+        name: &str,
+        id_prefix: &str,
+        veto: &HashSet<String>,
+    ) -> Result<Task> {
+        store::valid_name(name)?;
+        self.task_init()?;
+        self.touch(name)?;
+        let (path, mut task) = self.find_task("todo", id_prefix)?;
+        let open_ids: Vec<String> = self
+            .task_list(&["todo", "doing"])?
+            .into_iter()
+            .map(|(_, t)| t.id)
+            .collect();
+        if Self::is_umbrella(&task.id, &open_ids) || veto.contains(&task.id) {
+            bail!(
+                "{} is an epic or work the tracker no longer offers — take a leaf instead",
+                task.id
+            );
+        }
+        let dest = self.task_dir("doing").join(format!("{}.json", task.id));
+        if fs::rename(&path, &dest).is_err() {
+            bail!("someone took {} first", task.id);
+        }
+        task.taken_by = Some(name.to_string());
+        fs::write(&dest, serde_json::to_vec(&task)?)?;
+        Ok(task)
+    }
+
     pub fn task_done(&self, name: &str, id_prefix: &str) -> Result<Task> {
         let (path, mut task) = self.find_task("doing", id_prefix)?;
         if task.taken_by.as_deref() != Some(name) {
@@ -321,11 +355,18 @@ impl Store {
         match matches.len() {
             0 => bail!("no {} task matching '{}'", state, id_prefix),
             1 => Ok(matches.into_iter().next().unwrap()),
-            n => bail!(
-                "'{}' is ambiguous ({} matches) — use more of the id",
-                id_prefix,
-                n
-            ),
+            n => {
+                // An exact id always wins over its own dotted children
+                // (`bd-1` vs `bd-1.2`) — only true prefixes are ambiguous.
+                if let Some(i) = matches.iter().position(|(_, t)| t.id == id_prefix) {
+                    return Ok(matches.swap_remove(i));
+                }
+                bail!(
+                    "'{}' is ambiguous ({} matches) — use more of the id",
+                    id_prefix,
+                    n
+                )
+            }
         }
     }
 }

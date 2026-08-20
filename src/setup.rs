@@ -362,21 +362,24 @@ fn agents_md_section() -> String {
         - **Identity.** Use `$MURMUR_AGENT` as your name if set; inside Herdr the pane's\n\
         agent name is used automatically. Otherwise pick a short stable one\n\
         (e.g. `codex-1`) and use it consistently via `--as <name>`.\n\
-        - **Kick off work.** `murmur start bd-a1b2 --kind grok` pulls the bead\n\
-        onto the board and, if Herdr is running, starts a named herd against it.\n\
-        - **Durable work lives in beads.** Plan in `bd` (`bd create`, `bd dep add`,\n\
-        `bd show`); `murmur task sync beads` mirrors ready beads onto the board and\n\
-        pushes take/done back. Record decisions in beads, chatter in murmur.\n\
         - **Announce yourself** once per session: `murmur join <name>`.\n\
-        - **Check your mail** between tasks and before finishing:\n\
-        `murmur inbox --as <name>`. Reply to questions with the command shown.\n\
+        - **Check your mail first** and between tasks: `murmur inbox --as <name>`.\n\
+        Your lead assigns work by mail — that assignment, not the board, is your queue.\n\
         - **Message peers** instead of guessing their state:\n\
         `murmur send <peer> \"...\" --as <name>` (`'*'` broadcasts;\n\
         `--reply` blocks for an answer). `murmur who` lists everyone.\n\
-        - **Shared work queue.** `murmur task take --as <name>` atomically assigns you\n\
-        the oldest *leaf* open task (parent epics with dotted children stay on the\n\
-        board); finish with `murmur task done <id> --as <name>` or put it\n\
-        back with `murmur task drop <id> --as <name>`. `murmur task list` shows the board.\n\
+        - **Take what you were assigned, by id:** `murmur task take <id> --as <name>`;\n\
+        finish with `murmur task done <id> --as <name>` or put it back with\n\
+        `murmur task drop <id> --as <name>`. Bare `murmur task take` (oldest open leaf)\n\
+        only when the lead says the board is yours. `murmur task list` shows the board.\n\
+        - **If you were briefed as a worker**, your slice is the job: when it is done and\n\
+        your inbox is empty, report to lead and stop. Merging, CI, and the wider board\n\
+        belong to the lead.\n\
+        - **Never sync the tracker wholesale.** `murmur task sync beads` is the lead's\n\
+        (or the human's) call, scoped: `--parent <epic>` or `--label <l>`. On a real\n\
+        tracker an unscoped sync floods the board for everyone. Durable planning lives\n\
+        in `bd` (`bd create`, `bd dep add`); decisions go in beads, chatter in murmur.\n\
+        Which agent kind fits which work is in `FLEET.md`.\n\
         - **Don't stomp on claimed files.** `murmur claims` lists advisory file claims;\n\
         claim before editing contested files with `murmur claim <path> --as <name>` and\n\
         release after. If a file is claimed by someone else, coordinate — don't edit it.\n\

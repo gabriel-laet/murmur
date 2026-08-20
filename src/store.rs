@@ -22,7 +22,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_CLAIM_TTL_SECS: u64 = 900;
+/// An hour: agent worktree sessions routinely outlive the old 15 minutes,
+/// and an expired claim that lied about being free is worse than a stale
+/// one you can see and release.
+pub const DEFAULT_CLAIM_TTL_SECS: u64 = 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Msg {
@@ -106,6 +109,10 @@ pub struct HerdSnap {
     pub worktrees: Vec<String>,
     #[serde(default)]
     pub slug: String,
+    /// Paths the whole herd converges on (shared registries, barrel files):
+    /// named in every brief, checked by `murmur restack`.
+    #[serde(default)]
+    pub hubs: Vec<String>,
 }
 
 pub struct Store {
@@ -657,6 +664,53 @@ impl Store {
         Ok((agents_removed, claims_removed))
     }
 
+    /// Prune what a finished herd leaves behind, without touching the live
+    /// bus: local agents whose process is gone AND that nobody has seen for
+    /// `age_secs`, done tasks whose files are older than `age_secs`, and
+    /// expired claims. Inboxes and logs are never touched.
+    pub fn clean_stale(&self, age_secs: u64) -> Result<(usize, usize, usize)> {
+        let me = self.node_name()?;
+        let cutoff = now_secs().saturating_sub(age_secs);
+        let mut agents_removed = 0;
+        for agent in self.agents()? {
+            let local = agent.node.is_empty() || agent.node == me;
+            if local && !pid_alive(agent.pid) && agent.last_seen < cutoff {
+                self.leave(&agent.name)?;
+                agents_removed += 1;
+            }
+        }
+        let mut tasks_removed = 0;
+        let done = self.root.join("tasks").join("done");
+        if done.is_dir() {
+            for entry in fs::read_dir(&done)?.filter_map(|e| e.ok()) {
+                let old = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age.as_secs() >= age_secs);
+                if old {
+                    let _ = fs::remove_file(entry.path());
+                    tasks_removed += 1;
+                }
+            }
+        }
+        let mut claims_removed = 0;
+        let dir = self.root.join("claims");
+        if dir.is_dir() {
+            for entry in fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
+                match read_claim(&entry.path()) {
+                    Some(c) if !c.expired() => {}
+                    _ => {
+                        let _ = fs::remove_file(entry.path());
+                        claims_removed += 1;
+                    }
+                }
+            }
+        }
+        Ok((agents_removed, tasks_removed, claims_removed))
+    }
+
     // ---- herd snapshot (userland start/stop) ----
 
     fn herd_path(&self) -> PathBuf {
@@ -710,14 +764,49 @@ pub fn valid_name(name: &str) -> Result<()> {
 }
 
 /// Absolute-ize without requiring the file to exist (it may not, yet).
+/// Claim identity. Inside a git checkout the key is
+/// `<main-repo-git-dir>::<repo-relative-path>`, so the same logical file
+/// claimed from two worktrees of one repo collides — worktree `.git` files
+/// point back at the main repo's `.git/worktrees/<name>`, which is the
+/// shared identity. Outside a repo the key stays the absolute path.
 fn canonical_path(path: &str) -> String {
     let p = Path::new(path);
-    if p.is_absolute() {
-        path.to_string()
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
     } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(p).display().to_string())
-            .unwrap_or_else(|_| path.to_string())
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => return path.to_string(),
+        }
+    };
+    match repo_identity(&abs) {
+        Some((repo, rel)) => format!("{repo}::{rel}"),
+        None => abs.display().to_string(),
+    }
+}
+
+/// Walk up from `abs` to the nearest `.git`; resolve a worktree's `.git`
+/// *file* (`gitdir: <main>/.git/worktrees/<x>`) to the main `.git` so all
+/// worktrees of one repo share an identity. No subprocess.
+fn repo_identity(abs: &Path) -> Option<(String, String)> {
+    let mut dir = abs.parent()?;
+    loop {
+        let dot = dir.join(".git");
+        if dot.is_dir() {
+            let rel = abs.strip_prefix(dir).ok()?;
+            return Some((dot.display().to_string(), rel.display().to_string()));
+        }
+        if dot.is_file() {
+            let text = fs::read_to_string(&dot).ok()?;
+            let gitdir = text.strip_prefix("gitdir:")?.trim();
+            let main = match gitdir.rfind("/worktrees/") {
+                Some(i) => &gitdir[..i],
+                None => gitdir,
+            };
+            let rel = abs.strip_prefix(dir).ok()?;
+            return Some((main.to_string(), rel.display().to_string()));
+        }
+        dir = dir.parent()?;
     }
 }
 

@@ -6,6 +6,7 @@ mod fleet;
 mod herdr;
 mod hook;
 mod mcp;
+mod restack;
 mod secrets;
 mod setup;
 mod start;
@@ -147,6 +148,13 @@ enum Command {
     Clean {
         #[arg(long)]
         all: bool,
+        /// Also prune what a finished herd left behind — long-gone agents and
+        /// old done tasks — without touching inboxes or logs
+        #[arg(long)]
+        stale: bool,
+        /// How old "stale" is, in hours
+        #[arg(long, default_value_t = 24)]
+        age_hours: u64,
     },
     /// Shared work queue: a task board where taking a task is atomic
     Task {
@@ -193,10 +201,57 @@ enum Command {
         /// branch is the integration branch and only the lead merges
         #[arg(long)]
         worktree: bool,
+        /// Give this herd its own bus (.murmur-<name>/) so waves never mix
+        #[arg(long)]
+        board: Option<String>,
+        /// Repo helper that builds each agent checkout instead of bare
+        /// `git worktree add` (runs with MURMUR_WORKTREE_{DIR,BRANCH,NAME})
+        #[arg(long, value_name = "CMD")]
+        worktree_cmd: Option<String>,
+        /// A path the whole herd converges on (repeatable); named in every
+        /// brief and checked by `murmur restack`
+        #[arg(long, value_name = "PATH")]
+        hub: Vec<String>,
     },
+    /// Plan first: start only a lead, briefed to slice the goal into beads
+    /// and summon its own workers when the plan is ready
+    Plan {
+        /// What to work on. A bead id like bd-a1b2 is enough on its own.
+        goal: Option<String>,
+        /// Bead id (bd-a1b2). Implied when GOAL looks like one.
+        #[arg(long)]
+        bead: Option<String>,
+        /// Kind of the planning lead (claude, grok, ...)
+        #[arg(long)]
+        kind: Option<String>,
+        /// Give this herd its own bus (.murmur-<name>/)
+        #[arg(long)]
+        board: Option<String>,
+        /// A path the whole herd converges on (repeatable)
+        #[arg(long, value_name = "PATH")]
+        hub: Vec<String>,
+    },
+    /// Lead's merge queue: merge each worker branch into the current branch,
+    /// one at a time, gated by --cmd; stops with facts on the first conflict
+    Restack {
+        /// Command to run after each merge (its failure stops the queue)
+        #[arg(long, value_name = "CMD")]
+        cmd: Option<String>,
+    },
+    /// One snapshot of every herd branch's PR: number, state, checks (needs gh)
+    Pr {
+        #[command(subcommand)]
+        cmd: PrCmd,
+    },
+    /// The fleet roster plus murmur-observed agent starts (24h / 7d)
+    Fleet,
     /// Tear down the last herd: close its Herdr workspace, drop presence,
     /// remove worktrees `start --worktree` created
-    Stop,
+    Stop {
+        /// The named board whose herd to stop (see start --board)
+        #[arg(long)]
+        board: Option<String>,
+    },
     /// Check the fleet roster against what this machine can launch right now:
     /// herdr up, kind binaries on PATH, cloud keys present
     Doctor,
@@ -233,6 +288,12 @@ enum SecretCmd {
 }
 
 #[derive(Subcommand)]
+enum PrCmd {
+    /// PR number, state, and check rollup for each herd branch
+    Status,
+}
+
+#[derive(Subcommand)]
 enum CloudCmd {
     /// Show a cloud agent's state (the provider's agent record, as JSON)
     Status { id: String },
@@ -260,8 +321,10 @@ enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Atomically take the oldest open task
+    /// Atomically take a task: a specific one by id, or the oldest open leaf
     Take {
+        /// Task id (prefix is enough). Omit to take the oldest open leaf.
+        id: Option<String>,
         #[arg(long = "as", value_name = "NAME")]
         r#as: Option<String>,
         #[arg(long)]
@@ -279,10 +342,20 @@ enum TaskCmd {
         #[arg(long = "as", value_name = "NAME")]
         r#as: Option<String>,
     },
-    /// Reconcile the board with the tracker (currently: beads)
+    /// Reconcile the board with the tracker (currently: beads). Pulls are
+    /// scoped: on a big tracker pass --parent/--label, or --all to force
     Sync {
         /// Adapter name (beads)
         backend: String,
+        /// Pull only this bead and its ready descendants
+        #[arg(long)]
+        parent: Option<String>,
+        /// Pull only beads carrying this label
+        #[arg(long)]
+        label: Option<String>,
+        /// Pull everything even when the ready set is large
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -321,14 +394,23 @@ fn run() -> anyhow::Result<()> {
         Command::Claims { json } => commands::claims(json),
         Command::Log { count, json } => commands::log(count, json),
         Command::Watch { all, json } => commands::watch(all, json),
-        Command::Clean { all } => commands::clean(all),
+        Command::Clean {
+            all,
+            stale,
+            age_hours,
+        } => commands::clean(all, stale, age_hours),
         Command::Task { cmd } => match cmd {
             TaskCmd::Add { title, body, r#as } => commands::task_add(&title, body, r#as),
             TaskCmd::List { all, json } => commands::task_list(all, json),
-            TaskCmd::Take { r#as, json } => commands::task_take(r#as, json),
+            TaskCmd::Take { id, r#as, json } => commands::task_take(id, r#as, json),
             TaskCmd::Done { id, r#as } => commands::task_done(&id, r#as),
             TaskCmd::Drop { id, r#as } => commands::task_drop(&id, r#as),
-            TaskCmd::Sync { backend } => commands::task_sync(&backend),
+            TaskCmd::Sync {
+                backend,
+                parent,
+                label,
+                all,
+            } => commands::task_sync(&backend, parent, label, all),
         },
         Command::Sync { target, stdio } => {
             if stdio {
@@ -351,6 +433,9 @@ fn run() -> anyhow::Result<()> {
             kind,
             no_herdr,
             worktree,
+            board,
+            worktree_cmd,
+            hub,
         } => start::run(start::Opts {
             goal,
             bead,
@@ -358,8 +443,35 @@ fn run() -> anyhow::Result<()> {
             kind,
             no_herdr,
             worktree,
+            board,
+            worktree_cmd,
+            hubs: hub,
+            plan: false,
         }),
-        Command::Stop => start::stop(),
+        Command::Plan {
+            goal,
+            bead,
+            kind,
+            board,
+            hub,
+        } => start::run(start::Opts {
+            goal,
+            bead,
+            workers: 1,
+            kind,
+            no_herdr: false,
+            worktree: false,
+            board,
+            worktree_cmd: None,
+            hubs: hub,
+            plan: true,
+        }),
+        Command::Restack { cmd } => restack::run(cmd),
+        Command::Pr { cmd } => match cmd {
+            PrCmd::Status => restack::pr_status(),
+        },
+        Command::Fleet => fleet::show(),
+        Command::Stop { board } => start::stop(board),
         Command::Doctor => doctor::run(),
         Command::Cloud { cmd } => match cmd {
             CloudCmd::Status { id } => cloud::status(&id),

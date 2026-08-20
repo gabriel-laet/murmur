@@ -113,6 +113,13 @@ their ids; transitions push back (take → in_progress + assignee, done →
 closed with attribution, drop → open); `synced_state` makes pushes
 non-repeating.
 
+The take path is assignment-first: the lead assigns a slice by mail and the
+worker takes it by id (`task take <id>`); oldest-open-leaf is the fallback
+for boards that are genuinely a free-for-all, and unscoped tracker pulls are
+guarded (a big `bd ready` set requires `--parent`/`--label`/`--all`). Herds
+can be given their own bus (`start --board <name>` → `.murmur-<name>/`), so
+concurrent waves on one machine never share agents, mail, or tasks.
+
 There is one assignment, and beads owns it. Beads decides what exists;
 murmur decides who has the lock; the board is a projection of `bd ready`,
 never a second tracker. Concretely: only leaves pull (a parent of a ready
@@ -133,6 +140,23 @@ learns what a bead is. The board slims toward a staging area for beads,
 kept because any process that can `mv` participates with no `bd` installed.
 Other trackers stay possible as the same adapter shape; beads is the default
 because it shares the thesis: state in files, transport you already trust.
+
+## The merge queue and the git host
+
+"Lead owns the integration branch" used to be a sentence in a brief; now it
+is `murmur restack`: merge each worker branch into the current checkout one
+at a time, gate each merge on a command, warn on declared hub files, stop
+with the conflicting files. Merges, never rebases — worker branches are
+other people's live checkouts. `murmur pr status` (via `gh`, the same
+shell-out shape as `bd` and `herdr`) snapshots each herd branch's PR and
+checks, and restack holds a branch whose PR checks are red.
+
+Direction, not yet built: PR events as gates. The natural next step is
+"a bead does not close until its PR merges" — `task done` records the PR,
+sync closes the bead only when `gh` says merged, and a PR going red mails
+the holder. That stays adapter logic (beads owns the gate's truth, the git
+host owns CI), and murmur stays a poller over CLIs — no webhooks, no
+daemon, in keeping with everything else here.
 
 ## Remote: replication, not networking
 
