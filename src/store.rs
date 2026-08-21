@@ -1,96 +1,35 @@
-//! The entire system is a directory of JSON files.
+//! The foreman's notebook — the only state murmur keeps.
 //!
 //! ```text
 //! .murmur/
 //!   .gitignore            self-ignoring, like target/
-//!   agents/<name>.json    presence (pid, cwd, last_seen)
-//!   inbox/<name>/*.json   one file per pending message
-//!   claims/<path>.json    advisory file claims with TTL
-//!   log/<node>.jsonl      append-only record of every message
+//!   herd.json             the running wave: workspace, agents, worktrees, hubs
+//!   briefs/<name>.txt     each agent's brief, kept for re-delivery
+//!   spool/<name>/*.json   undelivered tells, drained into prompts on idle-wake
 //!   tmp/                  staging for atomic renames
 //! ```
 //!
-//! Delivery is `write to tmp/ + rename into inbox/` — atomic on POSIX, so a
-//! reader never sees a half-written message. No daemon, no sockets, no locks
-//! beyond what the filesystem gives us for free.
+//! Everything live belongs to herdr (panes, presence, delivery); everything
+//! durable about the *work* belongs to beads (plan, assignment, notes).
+//! This directory holds only what neither owns: the wave snapshot, the
+//! briefs, and messages waiting for an agent that wasn't listening.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// An hour: agent worktree sessions routinely outlive the old 15 minutes,
-/// and an expired claim that lied about being free is worse than a stale
-/// one you can see and release.
-pub const DEFAULT_CLAIM_TTL_SECS: u64 = 3600;
-
+/// A tell that could not be delivered into a live prompt; the idle-wake
+/// plugin drains these the moment the agent settles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Msg {
-    pub id: String,
+pub struct Spooled {
     pub from: String,
     pub to: String,
     /// unix millis
     pub ts: u64,
     pub body: String,
-    /// node the message originated on
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub node: String,
-    /// id of the message this replies to
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub re: Option<String>,
-    /// sender is blocked waiting on a reply to this id
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub wants_reply: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Agent {
-    pub name: String,
-    pub pid: u32,
-    pub cwd: String,
-    pub joined_at: u64,
-    pub last_seen: u64,
-    /// node the agent lives on
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub node: String,
-}
-
-/// One line of a per-node log. The line number IS the sequence number, so a
-/// sync vector is just {node: line_count} and "what am I missing" is
-/// "lines after N" — no counters to maintain.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-pub enum Entry {
-    /// a message delivered to one recipient's inbox
-    #[serde(rename = "msg")]
-    Msg { msg: Msg },
-    /// recipient consumed message `id` — suppresses re-materialization
-    /// everywhere and deletes stray copies
-    #[serde(rename = "tomb")]
-    Tomb { id: String, to: String, ts: u64 },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Claim {
-    pub path: String,
-    pub holder: String,
-    /// unix secs
-    pub ts: u64,
-    pub ttl_secs: u64,
-}
-
-impl Claim {
-    pub fn expired(&self) -> bool {
-        now_secs() >= self.ts + self.ttl_secs
-    }
-}
-
-pub enum ClaimResult {
-    Granted,
-    Held(Claim),
 }
 
 /// Snapshot of the last `murmur start` herd, so `murmur stop` can tear it
@@ -125,7 +64,7 @@ impl Store {
     }
 
     /// `MURMUR_DIR`, else the nearest `.murmur` walking up from cwd,
-    /// else `.murmur` in cwd (created lazily on first write).
+    /// else `.murmur` at the repo root (created lazily on first write).
     pub fn locate() -> Result<Store> {
         if let Ok(dir) = std::env::var("MURMUR_DIR") {
             return Ok(Store {
@@ -139,9 +78,7 @@ impl Store {
     /// Nearest `.murmur` walking up from `start`; else anchored to the
     /// repo, not the checkout: a git worktree resolves through its `.git`
     /// file to the main checkout, so every worktree of one repo shares one
-    /// bus with no MURMUR_DIR plumbing, and a fresh store lands at the
-    /// repo root — like `.git`, never a stray per-worktree copy. Outside
-    /// git: `start/.murmur`.
+    /// notebook with no MURMUR_DIR plumbing. Outside git: `start/.murmur`.
     pub fn locate_in(start: &Path) -> Store {
         let mut dir = start;
         loop {
@@ -165,7 +102,7 @@ impl Store {
     }
 
     pub fn init(&self) -> Result<()> {
-        for sub in ["agents", "inbox", "claims", "tmp"] {
+        for sub in ["briefs", "spool", "tmp"] {
             fs::create_dir_all(self.root.join(sub))?;
         }
         let gitignore = self.root.join(".gitignore");
@@ -175,509 +112,82 @@ impl Store {
         Ok(())
     }
 
-    // ---- messages ----
+    // ---- spool (deferred delivery) ----
 
-    /// Deliver a message. `to` may be an agent name or `*` for broadcast.
-    /// Returns the recipients and the message id.
-    pub fn send(
-        &self,
-        from: &str,
-        to: &str,
-        body: &str,
-        re: Option<&str>,
-        wants_reply: bool,
-    ) -> Result<(Vec<String>, String)> {
-        valid_name(from)?;
+    /// Queue a tell for an agent that isn't listening right now. The
+    /// idle-wake plugin delivers it as a prompt when the pane settles.
+    pub fn spool_push(&self, from: &str, to: &str, body: &str) -> Result<()> {
+        valid_name(to)?;
         self.init()?;
-        self.touch(from)?;
-
-        let recipients: Vec<String> = if to == "*" || to == "all" {
-            let peers: Vec<String> = self
-                .agents()?
-                .into_iter()
-                .map(|a| a.name)
-                .filter(|n| n != from)
-                .collect();
-            if peers.is_empty() {
-                bail!(
-                    "broadcast has no recipients: no other agents have joined (see `murmur who`)"
-                );
-            }
-            peers
-        } else {
-            valid_name(to)?;
-            vec![to.to_string()]
-        };
-
-        let node = self.node_name()?;
+        let dir = self.root.join("spool").join(to);
+        fs::create_dir_all(&dir)?;
         let ts = now_millis();
-        let id = format!("{}-{}", next_id(ts), node);
-        for recipient in &recipients {
-            let msg = Msg {
-                id: id.clone(),
-                from: from.to_string(),
-                to: recipient.clone(),
-                ts,
-                body: body.to_string(),
-                node: node.clone(),
-                re: re.map(|s| s.to_string()),
-                wants_reply,
-            };
-            let inbox = self.root.join("inbox").join(recipient);
-            fs::create_dir_all(&inbox)?;
-            let tmp = self.root.join("tmp").join(format!("{}-{}", recipient, id));
-            fs::write(&tmp, serde_json::to_vec(&msg)?)?;
-            fs::rename(&tmp, inbox.join(format!("{}.json", id)))?;
-            self.append_entry(&node, &Entry::Msg { msg })?;
-        }
-        Ok((recipients, id))
+        let msg = Spooled {
+            from: from.to_string(),
+            to: to.to_string(),
+            ts,
+            body: body.to_string(),
+        };
+        let id = next_id(ts);
+        let tmp = self.root.join("tmp").join(format!("spool-{to}-{id}"));
+        fs::write(&tmp, serde_json::to_vec(&msg)?)?;
+        fs::rename(&tmp, dir.join(format!("{id}.json")))?;
+        Ok(())
     }
 
-    /// Block until a reply to `re_id` lands in `name`'s inbox, consuming only
-    /// that message — everything else stays queued for a normal drain.
-    pub fn await_reply(
-        &self,
-        name: &str,
-        re_id: &str,
-        timeout: std::time::Duration,
-    ) -> Result<Option<Msg>> {
+    /// Take everything waiting for `name`, oldest first, removing it.
+    pub fn spool_drain(&self, name: &str) -> Result<Vec<Spooled>> {
         valid_name(name)?;
-        self.init()?;
-        let inbox = self.root.join("inbox").join(name);
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            if inbox.is_dir() {
-                let mut paths: Vec<PathBuf> = fs::read_dir(&inbox)?
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .collect();
-                paths.sort();
-                for path in paths {
-                    let Ok(bytes) = fs::read(&path) else { continue };
-                    if let Ok(msg) = serde_json::from_slice::<Msg>(&bytes) {
-                        if msg.re.as_deref() == Some(re_id) {
-                            let _ = fs::remove_file(&path);
-                            return Ok(Some(msg));
-                        }
-                    }
-                }
-            }
-            if std::time::Instant::now() >= deadline {
-                return Ok(None);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
-
-    /// Read pending messages, oldest first. Consumes them unless `peek`.
-    pub fn drain(&self, name: &str, peek: bool) -> Result<Vec<Msg>> {
-        valid_name(name)?;
-        self.init()?;
-        self.touch(name)?;
-        let inbox = self.root.join("inbox").join(name);
-        if !inbox.is_dir() {
+        let dir = self.root.join("spool").join(name);
+        if !dir.is_dir() {
             return Ok(Vec::new());
         }
-        let mut paths: Vec<PathBuf> = fs::read_dir(&inbox)?
+        let mut paths: Vec<PathBuf> = fs::read_dir(&dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
             .collect();
         paths.sort();
-        let mut msgs = Vec::new();
+        let mut out = Vec::new();
         for path in paths {
             let Ok(bytes) = fs::read(&path) else { continue };
-            if let Ok(msg) = serde_json::from_slice::<Msg>(&bytes) {
-                msgs.push(msg);
+            if let Ok(msg) = serde_json::from_slice::<Spooled>(&bytes) {
+                out.push(msg);
             }
-            if !peek {
-                let _ = fs::remove_file(&path);
-            }
+            let _ = fs::remove_file(&path);
         }
-        if !peek && !msgs.is_empty() {
-            let node = self.node_name()?;
-            for msg in &msgs {
-                self.append_entry(
-                    &node,
-                    &Entry::Tomb {
-                        id: msg.id.clone(),
-                        to: name.to_string(),
-                        ts: now_millis(),
-                    },
-                )?;
-            }
-        }
-        Ok(msgs)
+        Ok(out)
     }
 
-    // ---- node identity & per-node logs ----
-
-    pub fn node_name(&self) -> Result<String> {
-        self.init()?;
-        let path = self.root.join("node.json");
-        if let Ok(bytes) = fs::read(&path) {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let Some(name) = v["name"].as_str() {
-                    return Ok(name.to_string());
-                }
-            }
-        }
-        let host = std::env::var("HOSTNAME")
-            .ok()
-            .filter(|h| !h.is_empty())
-            .or_else(|| {
-                std::process::Command::new("hostname")
-                    .output()
-                    .ok()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    /// {agent → waiting tells}, for `who`/`status`.
+    pub fn spool_counts(&self) -> Vec<(String, usize)> {
+        let dir = self.root.join("spool");
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, usize)> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| {
+                let n = fs::read_dir(e.path())
+                    .map(|d| d.filter_map(|f| f.ok()).count())
+                    .unwrap_or(0);
+                (e.file_name().to_string_lossy().to_string(), n)
             })
-            .unwrap_or_default();
-        let host: String = host
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-            .take(24)
+            .filter(|(_, n)| *n > 0)
             .collect();
-        let host = if host.is_empty() {
-            "node".to_string()
-        } else {
-            host
-        };
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
-        let name = format!(
-            "{}-{}{:04x}",
-            host,
-            std::process::id() % 10000,
-            nanos & 0xffff
-        );
-        let tmp = self.root.join("tmp").join(format!("node-{}", name));
-        fs::write(
-            &tmp,
-            serde_json::to_vec(&serde_json::json!({ "name": name, "created": now_secs() }))?,
-        )?;
-        fs::rename(&tmp, &path)?;
-        Ok(name)
+        out.sort();
+        out
     }
 
-    pub fn log_dir(&self) -> PathBuf {
-        self.root.join("log")
-    }
-
-    fn append_entry(&self, node: &str, entry: &Entry) -> Result<()> {
-        fs::create_dir_all(self.log_dir())?;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.log_dir().join(format!("{}.jsonl", node)))?;
-        let mut line = serde_json::to_vec(entry)?;
-        line.push(b'\n');
-        file.write_all(&line)?;
-        Ok(())
-    }
-
-    /// {node → entry count}: the sync vector.
-    pub fn log_vector(&self) -> Result<std::collections::HashMap<String, u64>> {
-        let mut vector = std::collections::HashMap::new();
-        if !self.log_dir().is_dir() {
-            return Ok(vector);
-        }
-        for entry in fs::read_dir(self.log_dir())?.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let count = fs::read_to_string(&path)
-                .map(|c| c.lines().count())
-                .unwrap_or(0);
-            vector.insert(stem.to_string(), count as u64);
-        }
-        Ok(vector)
-    }
-
-    pub fn entries_after(&self, node: &str, after: u64) -> Result<Vec<Entry>> {
-        let path = self.log_dir().join(format!("{}.jsonl", node));
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        Ok(fs::read_to_string(&path)?
-            .lines()
-            .skip(after as usize)
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect())
-    }
-
-    /// Append entries to a foreign node's log. `after` is the count the
-    /// sender based the batch on; anything we already have is skipped, so
-    /// re-applying a batch is harmless.
-    pub fn append_foreign(&self, node: &str, after: u64, entries: &[Entry]) -> Result<()> {
-        let have = *self.log_vector()?.get(node).unwrap_or(&0);
-        anyhow::ensure!(
-            have >= after,
-            "gap in log for node {} (have {}, batch starts at {}) — sync with a peer that has the missing entries",
-            node, have, after
-        );
-        for entry in entries.iter().skip((have - after) as usize) {
-            self.append_entry(node, entry)?;
-        }
-        Ok(())
-    }
-
-    /// All message entries across all node logs, oldest first.
-    pub fn log_msgs(&self) -> Result<Vec<Msg>> {
-        let mut msgs = Vec::new();
-        for node in self.log_vector()?.keys() {
-            for entry in self.entries_after(node, 0)? {
-                if let Entry::Msg { msg } = entry {
-                    msgs.push(msg);
-                }
-            }
-        }
-        msgs.sort_by_key(|m| (m.ts, m.id.clone()));
-        Ok(msgs)
-    }
-
-    /// Rebuild inbox files from the merged logs: materialize messages that
-    /// have no tombstone anywhere, delete copies of consumed ones. Run after
-    /// applying a sync batch. Idempotent.
-    pub fn reconcile_inboxes(&self) -> Result<()> {
-        let mut tombs = std::collections::HashSet::new();
-        let mut msgs = Vec::new();
-        for node in self.log_vector()?.keys() {
-            for entry in self.entries_after(node, 0)? {
-                match entry {
-                    Entry::Msg { msg } => msgs.push(msg),
-                    Entry::Tomb { id, .. } => {
-                        tombs.insert(id);
-                    }
-                }
-            }
-        }
-        for msg in msgs {
-            if valid_name(&msg.to).is_err() {
-                continue;
-            }
-            let inbox = self.root.join("inbox").join(&msg.to);
-            let path = inbox.join(format!("{}.json", msg.id));
-            if tombs.contains(&msg.id) {
-                let _ = fs::remove_file(&path);
-            } else if !path.exists() {
-                fs::create_dir_all(&inbox)?;
-                let tmp = self
-                    .root
-                    .join("tmp")
-                    .join(format!("mat-{}-{}", msg.to, msg.id));
-                fs::write(&tmp, serde_json::to_vec(&msg)?)?;
-                fs::rename(&tmp, &path)?;
-            }
-        }
-        Ok(())
-    }
-
-    // ---- state merge (used by sync) ----
-
-    /// Last-writer-wins by `last_seen`.
-    pub fn merge_agent(&self, incoming: Agent) -> Result<()> {
-        self.init()?;
-        let path = self
-            .root
-            .join("agents")
-            .join(format!("{}.json", incoming.name));
-        if valid_name(&incoming.name).is_err() {
-            return Ok(());
-        }
-        if let Some(existing) = fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Agent>(&b).ok())
-        {
-            if existing.last_seen >= incoming.last_seen {
-                return Ok(());
-            }
-        }
-        let tmp = self
-            .root
-            .join("tmp")
-            .join(format!("agent-{}-{}", incoming.name, now_millis()));
-        fs::write(&tmp, serde_json::to_vec(&incoming)?)?;
-        fs::rename(&tmp, &path)?;
-        Ok(())
-    }
-
-    /// First claim wins; expired claims never displace anything.
-    pub fn merge_claim(&self, incoming: Claim) -> Result<()> {
-        self.init()?;
-        if incoming.expired() {
-            return Ok(());
-        }
-        let file = self.claim_file(&incoming.path);
-        if let Some(existing) = read_claim(&file) {
-            if !existing.expired() && existing.ts <= incoming.ts {
-                return Ok(());
-            }
-        }
-        let tmp = self
-            .root
-            .join("tmp")
-            .join(format!("claim-m-{}", now_millis()));
-        fs::write(&tmp, serde_json::to_vec(&incoming)?)?;
-        fs::rename(&tmp, &file)?;
-        Ok(())
-    }
-
-    // ---- presence ----
-
-    pub fn touch(&self, name: &str) -> Result<Agent> {
-        valid_name(name)?;
-        self.init()?;
-        let path = self.root.join("agents").join(format!("{}.json", name));
-        let ts = now_secs();
-        let joined_at = fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Agent>(&b).ok())
-            .map(|a| a.joined_at)
-            .unwrap_or(ts);
-        let agent = Agent {
-            name: name.to_string(),
-            pid: owner_pid(),
-            cwd: std::env::current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
-            joined_at,
-            last_seen: ts,
-            node: self.node_name()?,
-        };
-        let tmp = self.root.join("tmp").join(format!("agent-{}-{}", name, ts));
-        fs::write(&tmp, serde_json::to_vec(&agent)?)?;
-        fs::rename(&tmp, &path)?;
-        Ok(agent)
-    }
-
-    pub fn leave(&self, name: &str) -> Result<()> {
-        valid_name(name)?;
-        let _ = fs::remove_file(self.root.join("agents").join(format!("{}.json", name)));
-        for claim in self.claims()? {
-            if claim.holder == name {
-                let _ = self.release(&claim.path, name);
-            }
-        }
-        Ok(())
-    }
-
-    pub fn agents(&self) -> Result<Vec<Agent>> {
-        let dir = self.root.join("agents");
-        if !dir.is_dir() {
-            return Ok(Vec::new());
-        }
-        let mut agents: Vec<Agent> = fs::read_dir(&dir)?
-            .filter_map(|e| e.ok())
-            .filter_map(|e| fs::read(e.path()).ok())
-            .filter_map(|b| serde_json::from_slice(&b).ok())
-            .collect();
-        agents.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(agents)
-    }
-
-    // ---- claims (advisory file locks) ----
-
-    pub fn claim(&self, path: &str, holder: &str, ttl_secs: u64) -> Result<ClaimResult> {
-        valid_name(holder)?;
-        self.init()?;
-        let canonical = canonical_path(path);
-        let file = self.claim_file(&canonical);
-        if let Some(existing) = read_claim(&file) {
-            if existing.holder != holder && !existing.expired() {
-                return Ok(ClaimResult::Held(existing));
-            }
-        }
-        let claim = Claim {
-            path: canonical,
-            holder: holder.to_string(),
-            ts: now_secs(),
-            ttl_secs,
-        };
-        let tmp = self
-            .root
-            .join("tmp")
-            .join(format!("claim-{}-{}", holder, now_millis()));
-        fs::write(&tmp, serde_json::to_vec(&claim)?)?;
-        fs::rename(&tmp, &file)?;
-        Ok(ClaimResult::Granted)
-    }
-
-    pub fn release(&self, path: &str, holder: &str) -> Result<bool> {
-        let canonical = canonical_path(path);
-        let file = self.claim_file(&canonical);
-        if let Some(existing) = read_claim(&file) {
-            if existing.holder == holder || existing.expired() {
-                let _ = fs::remove_file(&file);
-                return Ok(true);
-            }
-            return Ok(false);
-        }
-        Ok(true)
-    }
-
-    pub fn claims(&self) -> Result<Vec<Claim>> {
-        let dir = self.root.join("claims");
-        if !dir.is_dir() {
-            return Ok(Vec::new());
-        }
-        let mut claims: Vec<Claim> = fs::read_dir(&dir)?
-            .filter_map(|e| e.ok())
-            .filter_map(|e| read_claim(&e.path()))
-            .filter(|c| !c.expired())
-            .collect();
-        claims.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(claims)
-    }
-
-    fn claim_file(&self, canonical: &str) -> PathBuf {
-        self.root
-            .join("claims")
-            .join(format!("{}.json", encode(canonical)))
-    }
-
-    // ---- housekeeping ----
-
-    /// Remove local agents whose pid is gone and claims that have expired.
-    /// Remote agents are never pruned here — their own node knows best.
-    /// Returns (agents_removed, claims_removed).
-    pub fn clean(&self) -> Result<(usize, usize)> {
-        let me = self.node_name()?;
-        let mut agents_removed = 0;
-        for agent in self.agents()? {
-            let local = agent.node.is_empty() || agent.node == me;
-            if local && !pid_alive(agent.pid) {
-                self.leave(&agent.name)?;
-                agents_removed += 1;
-            }
-        }
-        let mut claims_removed = 0;
-        let dir = self.root.join("claims");
-        if dir.is_dir() {
-            for entry in fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
-                match read_claim(&entry.path()) {
-                    Some(c) if !c.expired() => {}
-                    _ => {
-                        let _ = fs::remove_file(entry.path());
-                        claims_removed += 1;
-                    }
-                }
-            }
-        }
-        Ok((agents_removed, claims_removed))
-    }
+    // ---- briefs ----
 
     /// Briefs are durable: a dialog (login picker, trust prompt) can eat
     /// the first delivery even when the pane looks interactive-ready, so
-    /// the text is kept for re-delivery with `murmur poke <name> --brief`.
+    /// the text is kept for re-delivery with `murmur tell <name> --brief`.
     pub fn brief_save(&self, name: &str, text: &str) -> Result<()> {
         valid_name(name)?;
         self.init()?;
-        let dir = self.root.join("briefs");
-        fs::create_dir_all(&dir)?;
-        fs::write(dir.join(format!("{name}.txt")), text)?;
+        fs::write(self.root.join("briefs").join(format!("{name}.txt")), text)?;
         Ok(())
     }
 
@@ -688,54 +198,40 @@ impl Store {
             .with_context(|| format!("no stored brief for {name} (started by murmur start?)"))
     }
 
-    /// Prune what a finished herd leaves behind, without touching the live
-    /// bus: local agents whose process is gone AND that nobody has seen for
-    /// `age_secs`, done tasks whose files are older than `age_secs`, and
-    /// expired claims. Inboxes and logs are never touched.
-    pub fn clean_stale(&self, age_secs: u64) -> Result<(usize, usize, usize)> {
-        let me = self.node_name()?;
-        let cutoff = now_secs().saturating_sub(age_secs);
-        let mut agents_removed = 0;
-        for agent in self.agents()? {
-            let local = agent.node.is_empty() || agent.node == me;
-            if local && !pid_alive(agent.pid) && agent.last_seen < cutoff {
-                self.leave(&agent.name)?;
-                agents_removed += 1;
-            }
-        }
-        let mut tasks_removed = 0;
-        let done = self.root.join("tasks").join("done");
-        if done.is_dir() {
-            for entry in fs::read_dir(&done)?.filter_map(|e| e.ok()) {
-                let old = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.elapsed().ok())
-                    .is_some_and(|age| age.as_secs() >= age_secs);
-                if old {
-                    let _ = fs::remove_file(entry.path());
-                    tasks_removed += 1;
+    // ---- housekeeping ----
+
+    /// Drop spool files and briefs older than `age_secs`. Returns
+    /// (spooled_removed, briefs_removed).
+    pub fn clean(&self, age_secs: u64) -> Result<(usize, usize)> {
+        let mut spooled = 0;
+        let spool = self.root.join("spool");
+        if spool.is_dir() {
+            for agent_dir in fs::read_dir(&spool)?.filter_map(|e| e.ok()) {
+                if !agent_dir.path().is_dir() {
+                    continue;
                 }
-            }
-        }
-        let mut claims_removed = 0;
-        let dir = self.root.join("claims");
-        if dir.is_dir() {
-            for entry in fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
-                match read_claim(&entry.path()) {
-                    Some(c) if !c.expired() => {}
-                    _ => {
-                        let _ = fs::remove_file(entry.path());
-                        claims_removed += 1;
+                for f in fs::read_dir(agent_dir.path())?.filter_map(|e| e.ok()) {
+                    if file_older_than(&f.path(), age_secs) {
+                        let _ = fs::remove_file(f.path());
+                        spooled += 1;
                     }
                 }
             }
         }
-        Ok((agents_removed, tasks_removed, claims_removed))
+        let mut briefs = 0;
+        let dir = self.root.join("briefs");
+        if dir.is_dir() {
+            for f in fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
+                if file_older_than(&f.path(), age_secs) {
+                    let _ = fs::remove_file(f.path());
+                    briefs += 1;
+                }
+            }
+        }
+        Ok((spooled, briefs))
     }
 
-    // ---- herd snapshot (userland start/stop) ----
+    // ---- herd snapshot (start/stop) ----
 
     fn herd_path(&self) -> PathBuf {
         self.root.join("herd.json")
@@ -764,10 +260,12 @@ impl Store {
     }
 }
 
-fn read_claim(path: &Path) -> Option<Claim> {
-    fs::read(path)
+fn file_older_than(path: &Path, age_secs: u64) -> bool {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
         .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age.as_secs() >= age_secs)
 }
 
 /// Agent names become directory names, so keep them boring.
@@ -785,28 +283,6 @@ pub fn valid_name(name: &str) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// Absolute-ize without requiring the file to exist (it may not, yet).
-/// Claim identity. Inside a git checkout the key is
-/// `<main-repo-git-dir>::<repo-relative-path>`, so the same logical file
-/// claimed from two worktrees of one repo collides — worktree `.git` files
-/// point back at the main repo's `.git/worktrees/<name>`, which is the
-/// shared identity. Outside a repo the key stays the absolute path.
-fn canonical_path(path: &str) -> String {
-    let p = Path::new(path);
-    let abs = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(p),
-            Err(_) => return path.to_string(),
-        }
-    };
-    match repo_identity(&abs) {
-        Some((repo, rel)) => format!("{repo}::{rel}"),
-        None => abs.display().to_string(),
-    }
 }
 
 /// The main checkout's root for wherever `start` sits: walk up to the
@@ -833,69 +309,6 @@ fn main_repo_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Walk up from `abs` to the nearest `.git`; resolve a worktree's `.git`
-/// *file* (`gitdir: <main>/.git/worktrees/<x>`) to the main `.git` so all
-/// worktrees of one repo share an identity. No subprocess.
-fn repo_identity(abs: &Path) -> Option<(String, String)> {
-    let mut dir = abs.parent()?;
-    loop {
-        let dot = dir.join(".git");
-        if dot.is_dir() {
-            let rel = abs.strip_prefix(dir).ok()?;
-            return Some((dot.display().to_string(), rel.display().to_string()));
-        }
-        if dot.is_file() {
-            let text = fs::read_to_string(&dot).ok()?;
-            let gitdir = text.strip_prefix("gitdir:")?.trim();
-            let main = match gitdir.rfind("/worktrees/") {
-                Some(i) => &gitdir[..i],
-                None => gitdir,
-            };
-            let rel = abs.strip_prefix(dir).ok()?;
-            return Some((main.to_string(), rel.display().to_string()));
-        }
-        dir = dir.parent()?;
-    }
-}
-
-/// Filesystem-safe encoding of an arbitrary path.
-fn encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-' => out.push(b as char),
-            _ => out.push_str(&format!("%{:02X}", b)),
-        }
-    }
-    out
-}
-
-/// The process whose lifetime tracks the agent is our *parent* (the harness
-/// or shell that invoked us) — every murmur command itself exits in ms.
-fn owner_pid() -> u32 {
-    #[cfg(unix)]
-    {
-        std::os::unix::process::parent_id()
-    }
-    #[cfg(not(unix))]
-    {
-        std::process::id()
-    }
-}
-
-pub fn pid_alive(pid: u32) -> bool {
-    if cfg!(target_os = "linux") {
-        Path::new(&format!("/proc/{}", pid)).exists()
-    } else {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-}
-
 /// Is `bin` an executable file on PATH? Adapters probe before shelling out.
 pub fn on_path(bin: &str) -> bool {
     let Some(paths) = std::env::var_os("PATH") else {
@@ -919,24 +332,4 @@ pub fn next_id(ts: u64) -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     format!("{:013}-{}-{:03}", ts, std::process::id(), seq)
-}
-
-pub fn ago(secs_since_epoch: u64) -> String {
-    let delta = now_secs().saturating_sub(secs_since_epoch);
-    match delta {
-        0..=59 => format!("{}s", delta),
-        60..=3599 => format!("{}m", delta / 60),
-        3600..=86399 => format!("{}h", delta / 3600),
-        _ => format!("{}d", delta / 86400),
-    }
-}
-
-pub fn clock(ts_millis: u64) -> String {
-    let secs = ts_millis / 1000;
-    format!(
-        "{:02}:{:02}:{:02}",
-        (secs / 3600) % 24,
-        (secs / 60) % 60,
-        secs % 60
-    )
 }

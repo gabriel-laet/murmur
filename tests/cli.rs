@@ -43,233 +43,6 @@ fn stderr(out: &Output) -> String {
 }
 
 #[test]
-fn send_and_inbox_roundtrip() {
-    let store = fresh_dir("roundtrip");
-    let out = murmur(&store, &["send", "bob", "hello there", "--as", "alice"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("delivered to bob"));
-
-    let out = murmur(&store, &["inbox", "--as", "bob"]);
-    assert!(out.status.success());
-    assert!(stdout(&out).contains("alice: hello there"));
-
-    // consumed: second read is empty
-    let out = murmur(&store, &["inbox", "--as", "bob"]);
-    assert!(stdout(&out).is_empty());
-}
-
-#[test]
-fn messages_wait_for_agents_that_never_joined() {
-    let store = fresh_dir("offline");
-    murmur(&store, &["send", "sleeper", "wake up", "--as", "alice"]);
-    let out = murmur(&store, &["inbox", "--as", "sleeper"]);
-    assert!(stdout(&out).contains("wake up"));
-}
-
-#[test]
-fn broadcast_reaches_all_peers_but_not_sender() {
-    let store = fresh_dir("broadcast");
-    murmur(&store, &["join", "a"]);
-    murmur(&store, &["join", "b"]);
-    murmur(&store, &["join", "c"]);
-    let out = murmur(&store, &["send", "*", "heads up", "--as", "a"]);
-    assert!(out.status.success());
-    assert!(stdout(&murmur(&store, &["inbox", "--as", "b"])).contains("heads up"));
-    assert!(stdout(&murmur(&store, &["inbox", "--as", "c"])).contains("heads up"));
-    assert!(stdout(&murmur(&store, &["inbox", "--as", "a"])).is_empty());
-}
-
-#[test]
-fn broadcast_with_no_peers_fails() {
-    let store = fresh_dir("broadcast-empty");
-    let out = murmur(&store, &["send", "*", "anyone?", "--as", "a"]);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("no other agents"));
-}
-
-#[test]
-fn bad_agent_names_are_rejected() {
-    let store = fresh_dir("names");
-    let out = murmur(&store, &["send", "../escape", "x", "--as", "a"]);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("invalid agent name"));
-    let out = murmur(&store, &["inbox", "--as", ".hidden"]);
-    assert!(!out.status.success());
-}
-
-#[test]
-fn claim_conflicts_are_denied_and_release_works() {
-    let store = fresh_dir("claims");
-    let out = murmur(&store, &["claim", "/repo/src/auth.rs", "--as", "alice"]);
-    assert!(out.status.success());
-    let out = murmur(&store, &["claim", "/repo/src/auth.rs", "--as", "bob"]);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("claimed by alice"));
-    // re-claiming your own file is fine
-    let out = murmur(&store, &["claim", "/repo/src/auth.rs", "--as", "alice"]);
-    assert!(out.status.success());
-    // bob cannot release alice's claim
-    let out = murmur(&store, &["release", "/repo/src/auth.rs", "--as", "bob"]);
-    assert!(!out.status.success());
-    let out = murmur(&store, &["release", "/repo/src/auth.rs", "--as", "alice"]);
-    assert!(out.status.success());
-    let out = murmur(&store, &["claim", "/repo/src/auth.rs", "--as", "bob"]);
-    assert!(out.status.success());
-}
-
-#[test]
-fn task_lifecycle() {
-    let store = fresh_dir("tasks");
-    let out = murmur(
-        &store,
-        &[
-            "task",
-            "add",
-            "write tests",
-            "--body",
-            "unit + integration",
-            "--as",
-            "lead",
-        ],
-    );
-    assert!(out.status.success(), "{}", stderr(&out));
-    murmur(&store, &["task", "add", "update docs", "--as", "lead"]);
-
-    let out = murmur(&store, &["task", "list"]);
-    assert!(stdout(&out).contains("write tests"));
-    assert!(stdout(&out).contains("update docs"));
-
-    // oldest first
-    let out = murmur(&store, &["task", "take", "--as", "worker", "--json"]);
-    assert!(out.status.success());
-    let task: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-    assert_eq!(task["title"], "write tests");
-    assert_eq!(task["taken_by"], "worker");
-    let id = task["id"].as_str().unwrap().to_string();
-
-    // only the holder can finish it
-    let out = murmur(&store, &["task", "done", &id, "--as", "impostor"]);
-    assert!(!out.status.success());
-    let out = murmur(&store, &["task", "done", &id, "--as", "worker"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-
-    // one task left, then the board is empty
-    let out = murmur(&store, &["task", "take", "--as", "worker", "--json"]);
-    let task: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-    assert_eq!(task["title"], "update docs");
-    let out = murmur(&store, &["task", "take", "--as", "worker"]);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("no open tasks"));
-}
-
-#[test]
-fn dropped_tasks_return_to_the_board() {
-    let store = fresh_dir("task-drop");
-    murmur(&store, &["task", "add", "flaky job", "--as", "lead"]);
-    let out = murmur(&store, &["task", "take", "--as", "w1", "--json"]);
-    let task: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-    let id = task["id"].as_str().unwrap().to_string();
-    let out = murmur(&store, &["task", "drop", &id, "--as", "w1"]);
-    assert!(out.status.success());
-    let out = murmur(&store, &["task", "take", "--as", "w2", "--json"]);
-    let task: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-    assert_eq!(task["taken_by"], "w2");
-}
-
-#[test]
-fn contested_take_has_exactly_one_winner() {
-    let store = fresh_dir("task-race");
-    murmur(&store, &["task", "add", "the one task", "--as", "lead"]);
-    let handles: Vec<_> = (0..8)
-        .map(|i| {
-            let store = store.clone();
-            std::thread::spawn(move || {
-                let name = format!("racer{}", i);
-                murmur(&store, &["task", "take", "--as", &name])
-                    .status
-                    .success()
-            })
-        })
-        .collect();
-    let wins = handles
-        .into_iter()
-        .map(|h| h.join().unwrap())
-        .filter(|w| *w)
-        .count();
-    assert_eq!(wins, 1, "exactly one racer should win the task");
-}
-
-#[test]
-fn ask_and_reply_flow() {
-    let store = fresh_dir("reply");
-    // asker blocks waiting for a reply
-    let asker = {
-        let store = store.clone();
-        std::thread::spawn(move || {
-            murmur(
-                &store,
-                &[
-                    "send",
-                    "oracle",
-                    "is the schema final?",
-                    "--as",
-                    "asker",
-                    "--reply",
-                    "--timeout",
-                    "10",
-                ],
-            )
-        })
-    };
-    // oracle polls its inbox, finds the question, replies to its id
-    let mut question: Option<serde_json::Value> = None;
-    for _ in 0..100 {
-        let out = murmur(&store, &["inbox", "--as", "oracle", "--json"]);
-        let text = stdout(&out);
-        if !text.trim().is_empty() {
-            question = Some(serde_json::from_str(text.lines().next().unwrap()).unwrap());
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    let question = question.expect("oracle never received the question");
-    assert_eq!(question["wants_reply"], true);
-    let id = question["id"].as_str().unwrap();
-    let out = murmur(
-        &store,
-        &[
-            "send",
-            "asker",
-            "yes, ship it",
-            "--as",
-            "oracle",
-            "--reply-to",
-            id,
-        ],
-    );
-    assert!(out.status.success());
-
-    let out = asker.join().unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out).trim(), "yes, ship it");
-}
-
-#[test]
-fn inbox_wait_blocks_until_delivery() {
-    let store = fresh_dir("wait");
-    let receiver = {
-        let store = store.clone();
-        std::thread::spawn(move || {
-            murmur(&store, &["inbox", "--as", "r", "--wait", "--timeout", "10"])
-        })
-    };
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    murmur(&store, &["send", "r", "finally", "--as", "s"]);
-    let out = receiver.join().unwrap();
-    assert!(stdout(&out).contains("finally"));
-}
-
-#[test]
 fn secret_exec_injects_env_without_printing() {
     let store = fresh_dir("secret-exec");
     let out = Command::new(bin())
@@ -334,41 +107,6 @@ fn secret_exec_fails_on_unknown_backend_and_missing_var() {
     assert!(!out.status.success());
 }
 
-#[test]
-fn inbox_flags_secret_references_without_resolving() {
-    let store = fresh_dir("secret-inbox");
-    murmur(
-        &store,
-        &[
-            "send",
-            "bob",
-            "db creds: secret://infisical/proj/dev/DATABASE_URL",
-            "--as",
-            "alice",
-        ],
-    );
-    let out = Command::new(bin())
-        .args(["inbox", "--as", "bob"])
-        .env("MURMUR_DIR", &store)
-        .env("DATABASE_URL", "must-not-appear")
-        .output()
-        .unwrap();
-    let text = stdout(&out);
-    assert!(
-        text.contains("secret://infisical/proj/dev/DATABASE_URL"),
-        "ref itself is delivered"
-    );
-    assert!(text.contains("secret reference"), "annotation present");
-    assert!(
-        text.contains("murmur secret exec"),
-        "points at the safe path"
-    );
-    assert!(
-        !text.contains("must-not-appear"),
-        "value was never resolved"
-    );
-}
-
 fn fake_bd(base: &std::path::Path, log: &std::path::Path) -> PathBuf {
     bd_stub(
         base,
@@ -379,265 +117,6 @@ fn fake_bd(base: &std::path::Path, log: &std::path::Path) -> PathBuf {
   create) echo '{"id":"bd-9f3c","title":"'"$2"'","status":"open"}' ;;
   *) echo '{}' ;;"#,
     )
-}
-
-#[test]
-fn beads_sync_pulls_pushes_and_stays_idempotent() {
-    let store = fresh_dir("beads");
-    let base = store.parent().unwrap();
-    let log = base.join("bd-calls.log");
-    let stub = fake_bd(base, &log);
-
-    let sync = || {
-        Command::new(bin())
-            .args(["task", "sync", "beads"])
-            .env("MURMUR_DIR", &store)
-            .env("MURMUR_BEADS", &stub)
-            .output()
-            .unwrap()
-    };
-
-    // pull: the ready bead lands on the board once, keeping its own id
-    let out = sync();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("pulled 1"));
-    let out = sync();
-    assert!(
-        stdout(&out).contains("pulled 0"),
-        "re-sync must not duplicate"
-    );
-    let out = murmur(&store, &["task", "list"]);
-    assert!(stdout(&out).contains("bd-a1b2"));
-    assert!(stdout(&out).contains("Fix login flow"));
-
-    // take, then sync pushes in_progress with the agent as assignee, once
-    murmur(&store, &["task", "take", "--as", "worker-1"]);
-    let out = sync();
-    assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
-    let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(
-        calls.contains("update bd-a1b2 --status in_progress"),
-        "{calls}"
-    );
-    assert!(
-        calls.contains("--assignee worker-1"),
-        "assignee attributes the agent: {calls}"
-    );
-    let out = sync();
-    assert!(stdout(&out).contains("pushed 0"), "push is idempotent");
-
-    // done flows through as a close, with attribution
-    murmur(&store, &["task", "done", "bd-a1b2", "--as", "worker-1"]);
-    let out = sync();
-    assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
-    let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(
-        calls.contains("close bd-a1b2 --reason"),
-        "close reason is a flag, not a positional id: {calls}"
-    );
-    assert!(calls.contains("worker-1 via murmur"), "{calls}");
-}
-
-fn sync(from: &PathBuf, to: &std::path::Path) -> Output {
-    murmur(from, &["sync", &to.display().to_string()])
-}
-
-#[test]
-fn peers_auto_sync_converges_mailboxes_without_manual_sync() {
-    let a = fresh_dir("peers-a");
-    let b = fresh_dir("peers-b");
-    murmur(&a, &["join", "alice"]); // create a's store so the peer list has a home
-    std::fs::write(a.join("peers"), format!("# my fleet\n{}\n", b.display())).unwrap();
-
-    // send from a pushes to the peer immediately — bob reads on b, no sync run
-    murmur(
-        &a,
-        &["send", "bob", "ping across machines", "--as", "alice"],
-    );
-    let out = murmur(&b, &["inbox", "--as", "bob"]);
-    assert!(
-        stdout(&out).contains("alice: ping across machines"),
-        "{}",
-        stdout(&out)
-    );
-
-    // bob replies on b, which lists no peers (one-way reachability);
-    // alice's next inbox pulls it, because every sync is a two-way exchange
-    murmur(&b, &["send", "alice", "pong back", "--as", "bob"]);
-    let out = Command::new(bin())
-        .args(["inbox", "--as", "alice"])
-        .env("MURMUR_DIR", &a)
-        .env("MURMUR_SYNC_INTERVAL", "0")
-        .env_remove("MURMUR_AGENT")
-        .output()
-        .unwrap();
-    assert!(stdout(&out).contains("bob: pong back"), "{}", stdout(&out));
-}
-
-#[test]
-fn sync_without_target_walks_the_peer_list() {
-    let a = fresh_dir("peers-cmd-a");
-    let b = fresh_dir("peers-cmd-b");
-    murmur(&a, &["join", "alice"]);
-
-    // no peers listed → a helpful error, not a crash
-    let out = murmur(&a, &["sync"]);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("peers"), "{}", stderr(&out));
-
-    std::fs::write(a.join("peers"), format!("{}\n", b.display())).unwrap();
-    murmur(&a, &["send", "bob", "queued for the peer", "--as", "alice"]);
-    let out = murmur(&a, &["sync"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("synced with"), "{}", stdout(&out));
-    let out = murmur(&b, &["inbox", "--as", "bob"]);
-    assert!(
-        stdout(&out).contains("queued for the peer"),
-        "{}",
-        stdout(&out)
-    );
-}
-
-#[test]
-fn sync_delivers_messages_across_stores() {
-    let a = fresh_dir("sync-a");
-    let b = fresh_dir("sync-b");
-    murmur(&a, &["send", "bob", "hello across nodes", "--as", "alice"]);
-    let out = sync(&a, &b);
-    assert!(out.status.success(), "{}", stderr(&out));
-    let out = murmur(&b, &["inbox", "--as", "bob"]);
-    assert!(stdout(&out).contains("alice: hello across nodes"));
-    // the merged log is visible on b too
-    let out = murmur(&b, &["log", "-n", "10"]);
-    assert!(stdout(&out).contains("hello across nodes"));
-}
-
-#[test]
-fn consumed_messages_never_resurrect() {
-    let a = fresh_dir("tomb-a");
-    let b = fresh_dir("tomb-b");
-    murmur(&a, &["send", "bob", "read me once", "--as", "alice"]);
-    sync(&a, &b);
-    // bob reads on b — this writes a tombstone into b's log
-    let out = murmur(&b, &["inbox", "--as", "bob"]);
-    assert!(stdout(&out).contains("read me once"));
-    // tombstone flows back to a and kills a's materialized copy
-    sync(&a, &b);
-    assert!(
-        stdout(&murmur(&a, &["inbox", "--as", "bob"])).is_empty(),
-        "consumed on b, gone on a"
-    );
-    // and a third sync doesn't bring it back anywhere
-    sync(&a, &b);
-    assert!(stdout(&murmur(&a, &["inbox", "--as", "bob"])).is_empty());
-    assert!(stdout(&murmur(&b, &["inbox", "--as", "bob"])).is_empty());
-}
-
-#[test]
-fn sync_relays_through_intermediate_nodes() {
-    let a = fresh_dir("relay-a");
-    let b = fresh_dir("relay-b");
-    let c = fresh_dir("relay-c");
-    murmur(&a, &["send", "carol", "via b", "--as", "alice"]);
-    sync(&a, &b);
-    sync(&b, &c); // c never talks to a
-    let out = murmur(&c, &["inbox", "--as", "carol"]);
-    assert!(
-        stdout(&out).contains("alice: via b"),
-        "entry relayed a→b→c: {}",
-        stdout(&out)
-    );
-}
-
-#[test]
-fn sync_merges_presence_and_claims() {
-    let a = fresh_dir("state-a");
-    let b = fresh_dir("state-b");
-    murmur(&a, &["join", "alice"]);
-    murmur(&a, &["claim", "/repo/src/core.rs", "--as", "alice"]);
-    sync(&a, &b);
-    let out = murmur(&b, &["who"]);
-    assert!(stdout(&out).contains("alice"));
-    assert!(
-        stdout(&out).contains("remote"),
-        "alice shows as remote on b: {}",
-        stdout(&out)
-    );
-    // claim crossed too: bob is denied on b
-    let out = murmur(&b, &["claim", "/repo/src/core.rs", "--as", "bob"]);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("claimed by alice"));
-}
-
-#[test]
-fn contested_task_across_nodes_resolves_deterministically() {
-    let a = fresh_dir("conflict-a");
-    let b = fresh_dir("conflict-b");
-    murmur(&a, &["task", "add", "the contested one", "--as", "lead"]);
-    sync(&a, &b);
-    // partition: both sides take it
-    murmur(&a, &["task", "take", "--as", "zed"]);
-    murmur(&b, &["task", "take", "--as", "alpha"]);
-    sync(&a, &b);
-    // smaller holder name wins on BOTH sides
-    for store in [&a, &b] {
-        let out = murmur(store, &["task", "list", "--json"]);
-        let tasks: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-        assert_eq!(
-            tasks[0]["taken_by"],
-            "alpha",
-            "on {}: {}",
-            store.display(),
-            stdout(&out)
-        );
-        assert_eq!(tasks[0]["state"], "doing");
-    }
-    // the loser's done fails visibly; the winner's flows through
-    let out = murmur(&a, &["task", "list", "--json"]);
-    let id = serde_json::from_str::<serde_json::Value>(&stdout(&out)).unwrap()[0]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let out = murmur(&a, &["task", "done", &id, "--as", "zed"]);
-    assert!(!out.status.success());
-    let out = murmur(&b, &["task", "done", &id, "--as", "alpha"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    sync(&a, &b);
-    let out = murmur(&a, &["task", "list", "--all", "--json"]);
-    let tasks: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-    assert_eq!(
-        tasks[0]["state"],
-        "done",
-        "completion syncs back: {}",
-        stdout(&out)
-    );
-}
-
-#[test]
-fn sync_over_stdio_pipes_like_ssh() {
-    use std::os::unix::fs::PermissionsExt;
-    let a = fresh_dir("ssh-a");
-    let b = fresh_dir("ssh-b");
-    // stand-in for ssh: drop the host arg, run the murmur binary directly
-    let stub = a.parent().unwrap().join("fake-ssh.sh");
-    std::fs::write(
-        &stub,
-        format!("#!/bin/sh\nshift\nshift\nexec \"{}\" \"$@\"\n", bin()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    murmur(&a, &["send", "bob", "over the wire", "--as", "alice"]);
-    let out = Command::new(bin())
-        .args(["sync", &format!("fakehost:{}", b.display())])
-        .env("MURMUR_DIR", &a)
-        .env("MURMUR_SYNC_SSH", &stub)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("sent 1 entries"), "{}", stdout(&out));
-    let out = murmur(&b, &["inbox", "--as", "bob"]);
-    assert!(stdout(&out).contains("alice: over the wire"));
 }
 
 #[test]
@@ -668,22 +147,22 @@ fn setup_is_idempotent_and_merges() {
     let out = run(&["setup"]); // second run changes nothing
     assert!(stdout(&out).contains("already present"));
 
+    // No hooks, no MCP, no per-harness config: pre-existing Claude Code
+    // settings are untouched and the CLI is the protocol.
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(workdir.join(".claude/settings.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(settings["permissions"]["allow"][0], "Bash(ls:*)");
     let pre = settings["hooks"]["PreToolUse"].as_array().unwrap();
-    assert_eq!(pre.len(), 2, "existing hook kept, murmur hook appended");
-    assert!(settings["hooks"]["Stop"].is_array());
-    // No MCP, no per-harness config: the CLI is the protocol.
+    assert_eq!(pre.len(), 1, "murmur writes no hooks");
     assert!(!workdir.join(".mcp.json").exists());
     assert!(!workdir.join(".gemini/settings.json").exists());
 
     // AGENTS.md carries the universal contract, idempotently.
     let agents = std::fs::read_to_string(workdir.join("AGENTS.md")).unwrap();
     assert_eq!(agents.matches("murmur:begin").count(), 1);
-    assert!(agents.contains("murmur inbox"));
+    assert!(agents.contains("murmur tell"));
 
     // FLEET.md is seeded once and never clobbered.
     let fleet = std::fs::read_to_string(workdir.join("FLEET.md")).unwrap();
@@ -759,132 +238,30 @@ fn fake_herdr(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn identity_uses_herdr_agent_name_inside_herdr() {
-    let store = fresh_dir("herdr-id");
-    let base = store.parent().unwrap();
-    let stub = fake_herdr(
-        base,
-        r#"#!/bin/sh
-case "$1 $2" in
-  "agent get")
-    echo '{"result":{"agent":{"name":"backend","pane_id":"w1:p2","cwd":"."}}}' ;;
-  *) echo '{"result":{}}' ;;
-esac
-"#,
-    );
-    let out = Command::new(bin())
-        .args(["join"])
-        .env("MURMUR_DIR", &store)
-        .env_remove("MURMUR_AGENT")
-        .env("HERDR_ENV", "1")
-        .env("HERDR_PANE_ID", "w1:p2")
-        .env("MURMUR_HERDR", &stub)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(
-        stdout(&out).contains("joined as 'backend'"),
-        "{}",
-        stdout(&out)
-    );
-}
-
-#[test]
-fn identity_prefers_murmur_agent_over_herdr() {
-    let store = fresh_dir("herdr-id-override");
-    let base = store.parent().unwrap();
-    let stub = fake_herdr(
-        base,
-        r#"#!/bin/sh
-echo '{"result":{"agent":{"name":"backend","pane_id":"w1:p2"}}}'
-"#,
-    );
-    let out = Command::new(bin())
-        .args(["join"])
-        .env("MURMUR_DIR", &store)
-        .env("MURMUR_AGENT", "frontend")
-        .env("HERDR_ENV", "1")
-        .env("HERDR_PANE_ID", "w1:p2")
-        .env("MURMUR_HERDR", &stub)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(
-        stdout(&out).contains("joined as 'frontend'"),
-        "{}",
-        stdout(&out)
-    );
-}
-
-#[test]
-fn start_no_herdr_puts_goal_on_the_board() {
-    let store = fresh_dir("start-board");
-    let out = Command::new(bin())
-        .args(["start", "rewrite claim TTLs", "--no-herdr"])
-        .env("MURMUR_DIR", &store)
-        .env_remove("MURMUR_AGENT")
-        .env_remove("HERDR_ENV")
-        .env_remove("MURMUR_HERDR")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(
-        stdout(&out).contains("rewrite claim TTLs"),
-        "{}",
-        stdout(&out)
-    );
-    let list = murmur(&store, &["task", "list"]);
-    assert!(stdout(&list).contains("rewrite claim TTLs"));
-}
-
-#[test]
-fn start_pulls_a_bead_without_herdr() {
-    let store = fresh_dir("start-bead");
-    let base = store.parent().unwrap();
-    let log = base.join("start-bd.log");
-    let stub = fake_bd(base, &log);
-    let out = Command::new(bin())
-        .args(["start", "bd-a1b2", "--no-herdr"])
-        .env("MURMUR_DIR", &store)
-        .env("MURMUR_BEADS", &stub)
-        .env_remove("HERDR_ENV")
-        .env_remove("MURMUR_HERDR")
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("bd-a1b2"), "{}", stdout(&out));
-    assert!(stdout(&out).contains("Fix login flow"), "{}", stdout(&out));
-    let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(calls.contains("show bd-a1b2"), "{calls}");
-    let list = murmur(&store, &["task", "list"]);
-    assert!(stdout(&list).contains("bd-a1b2"));
-}
-
-#[test]
-fn start_goal_becomes_a_bead_when_beads_is_around() {
+fn start_goal_becomes_a_bead_and_needs_herdr() {
     let store = fresh_dir("start-goal-bead");
     let base = store.parent().unwrap();
     let log = base.join("goal-bd.log");
     let stub = fake_bd(base, &log);
+    // no herdr and no cloud kinds: start refuses — murmur is tied to herdr
     let out = Command::new(bin())
-        .args(["start", "rewrite claim TTLs", "--no-herdr"])
+        .args(["start", "rewrite claim TTLs", "--kind", "grok"])
         .env("MURMUR_DIR", &store)
         .env("MURMUR_BEADS", &stub)
+        .env("PATH", "/usr/bin:/bin")
         .env_remove("HERDR_ENV")
         .env_remove("MURMUR_HERDR")
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!out.status.success(), "{}", stdout(&out));
     assert!(
-        stdout(&out).contains("bd-9f3c"),
-        "goal got a durable bead id: {}",
-        stdout(&out)
+        stderr(&out).contains("needs a running herdr"),
+        "{}",
+        stderr(&out)
     );
+    // but the goal still got its durable home in beads first
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(calls.contains("create rewrite claim TTLs"), "{calls}");
-    let list = murmur(&store, &["task", "list"]);
-    assert!(stdout(&list).contains("bd-9f3c"));
-    assert!(stdout(&list).contains("rewrite claim TTLs"));
 }
 
 #[test]
@@ -1112,52 +489,6 @@ esac
     assert!(out.status.success(), "rerun: {}", stderr(&out));
 }
 
-fn write_task(store: &Path, state: &str, id: &str, title: &str) {
-    let dir = store.join("tasks").join(state);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join(format!("{id}.json")),
-        format!(
-            r#"{{"id":"{id}","title":"{title}","body":"","by":"beads","ts":1,"external_id":"{id}"}}"#
-        ),
-    )
-    .unwrap();
-}
-
-#[test]
-fn task_take_skips_umbrella_when_children_are_open() {
-    let store = fresh_dir("umbrella");
-    murmur(&store, &["join", "lead"]);
-    write_task(&store, "todo", "bd-1", "epic");
-    write_task(&store, "todo", "bd-1.2", "leaf");
-    let out = murmur(&store, &["task", "take", "--as", "w1", "--json"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    let task: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-    assert_eq!(task["id"], "bd-1.2", "leaf, not the epic: {}", stdout(&out));
-
-    // child now doing — parent still skipped, and the refusal says why
-    let out = murmur(&store, &["task", "take", "--as", "w2"]);
-    assert!(!out.status.success(), "parent must stay: {}", stdout(&out));
-    assert!(
-        stderr(&out).contains("no open leaf tasks"),
-        "{}",
-        stderr(&out)
-    );
-}
-
-/// A board task with a holder and a synced state, as sync would leave it.
-fn write_held_task(store: &Path, state: &str, id: &str, holder: &str, synced: &str) {
-    let dir = store.join("tasks").join(state);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join(format!("{id}.json")),
-        format!(
-            r#"{{"id":"{id}","title":"t","body":"","by":"beads","ts":1,"taken_by":"{holder}","external_id":"{id}","synced_state":"{synced}"}}"#
-        ),
-    )
-    .unwrap();
-}
-
 fn bd_stub(base: &std::path::Path, name: &str, log: &std::path::Path, cases: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = base.join(name);
@@ -1174,166 +505,7 @@ fn bd_stub(base: &std::path::Path, name: &str, log: &std::path::Path, cases: &st
 }
 
 #[test]
-fn take_refuses_the_epic_when_beads_holds_the_children() {
-    // The parent is the ONLY file on the board — the dotted-id heuristic
-    // can't see the children, but beads can: take must refuse, not swallow
-    // the epic.
-    let store = fresh_dir("veto-epic");
-    let base = store.parent().unwrap();
-    let log = base.join("veto-bd.log");
-    let stub = bd_stub(
-        base,
-        "bd-veto.sh",
-        &log,
-        r#"  ready) echo '[{"id":"bd-1","title":"Epic"},{"id":"bd-1.2","title":"Leaf","parent":"bd-1"}]' ;;
-  *) echo '{}' ;;"#,
-    );
-    write_task(&store, "todo", "bd-1", "epic");
-    let out = Command::new(bin())
-        .args(["task", "take", "--as", "w1"])
-        .env("MURMUR_DIR", &store)
-        .env("MURMUR_BEADS", &stub)
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "{}", stdout(&out));
-    assert!(
-        stderr(&out).contains("no open leaf tasks"),
-        "{}",
-        stderr(&out)
-    );
-    let list = stdout(&murmur(&store, &["task", "list"]));
-    assert!(list.contains("todo   bd-1"), "epic must stay open: {list}");
-}
-
-#[test]
-fn beads_closed_beats_a_murmur_take() {
-    // Another agent closed the bead; this node still holds the murmur take.
-    // Sync must end the task locally, never reopen or re-close the bead,
-    // and tell the ex-holder.
-    let store = fresh_dir("beads-closed");
-    let base = store.parent().unwrap();
-    let log = base.join("closed-bd.log");
-    let stub = bd_stub(
-        base,
-        "bd-closed.sh",
-        &log,
-        r#"  ready) echo '[]' ;;
-  show) echo '{"id":"bd-a1b2","title":"t","status":"closed"}' ;;
-  *) echo '{}' ;;"#,
-    );
-    write_held_task(&store, "doing", "bd-a1b2", "w1", "doing");
-    let out = Command::new(bin())
-        .args(["task", "sync", "beads"])
-        .env("MURMUR_DIR", &store)
-        .env("MURMUR_BEADS", &stub)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("reconciled 1"), "{}", stdout(&out));
-
-    let list = stdout(&murmur(&store, &["task", "list", "--all"]));
-    assert!(list.contains("done   bd-a1b2"), "{list}");
-    let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(
-        !calls.contains("close bd-a1b2"),
-        "already closed — no push: {calls}"
-    );
-    assert!(
-        !calls.contains("--status open"),
-        "never reopen a closed bead: {calls}"
-    );
-    let mail = stdout(&murmur(&store, &["inbox", "--as", "w1"]));
-    assert!(
-        mail.contains("closed in beads"),
-        "holder must be told: {mail}"
-    );
-}
-
-#[test]
-fn beads_assignee_wins_a_contested_take() {
-    // Beads says w2 owns the bead; this node's take by w1 loses: forced
-    // drop, mail to w1, and no "open" pushed back over the assignment.
-    let store = fresh_dir("beads-assignee");
-    let base = store.parent().unwrap();
-    let log = base.join("assignee-bd.log");
-    let stub = bd_stub(
-        base,
-        "bd-assignee.sh",
-        &log,
-        r#"  ready) echo '[]' ;;
-  show) echo '{"id":"bd-a1b2","title":"t","status":"in_progress","assignee":"w2"}' ;;
-  *) echo '{}' ;;"#,
-    );
-    write_held_task(&store, "doing", "bd-a1b2", "w1", "doing");
-    let out = Command::new(bin())
-        .args(["task", "sync", "beads"])
-        .env("MURMUR_DIR", &store)
-        .env("MURMUR_BEADS", &stub)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("reconciled 1"), "{}", stdout(&out));
-
-    let list = stdout(&murmur(&store, &["task", "list"]));
-    assert!(list.contains("todo   bd-a1b2"), "{list}");
-    assert!(!list.contains("taken by"), "the lock is gone: {list}");
-    let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(
-        !calls.contains("--status open"),
-        "the losing node must not reopen over the assignee: {calls}"
-    );
-    let mail = stdout(&murmur(&store, &["inbox", "--as", "w1"]));
-    assert!(mail.contains("assigned to w2"), "{mail}");
-}
-
-#[test]
-fn bd_human_text_on_mutations_is_success() {
-    // Some bd builds print a checkmark even under --json. A green exit on
-    // update/close is success; sync must carry on and mark the push done.
-    let store = fresh_dir("beads-checkmark");
-    let base = store.parent().unwrap();
-    let log = base.join("checkmark-bd.log");
-    let stub = bd_stub(
-        base,
-        "bd-checkmark.sh",
-        &log,
-        r#"  ready) echo '[{"id":"bd-a1b2","title":"t"}]' ;;
-  show) echo '{"id":"bd-a1b2","title":"t","status":"open"}' ;;
-  update|close) echo '✓ ok' ;;
-  *) echo '{}' ;;"#,
-    );
-    let sync = || {
-        Command::new(bin())
-            .args(["task", "sync", "beads"])
-            .env("MURMUR_DIR", &store)
-            .env("MURMUR_BEADS", &stub)
-            .output()
-            .unwrap()
-    };
-    let out = sync();
-    assert!(out.status.success(), "{}", stderr(&out));
-    murmur(&store, &["task", "take", "--as", "w1"]);
-    let out = sync();
-    assert!(
-        out.status.success(),
-        "checkmark must not abort: {}",
-        stderr(&out)
-    );
-    assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
-    let out = sync();
-    assert!(
-        stdout(&out).contains("pushed 0"),
-        "push stays idempotent: {}",
-        stdout(&out)
-    );
-    murmur(&store, &["task", "done", "bd-a1b2", "--as", "w1"]);
-    let out = sync();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("pushed 1"), "{}", stdout(&out));
-}
-
-#[test]
-fn poke_revives_a_done_agent_before_prompting() {
+fn tell_revives_a_done_agent_before_prompting() {
     let store = fresh_dir("poke-revive");
     let base = store.parent().unwrap();
     let log = base.join("poke-herdr.log");
@@ -1351,85 +523,22 @@ esac
         ),
     );
     let out = Command::new(bin())
-        .args(["poke", "w1", "pick up the follow-ups"])
+        .args(["tell", "w1", "pick up the follow-ups"])
         .env("MURMUR_DIR", &store)
         .env("MURMUR_HERDR", &stub)
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("revived w1"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("delivered to w1"), "{}", stdout(&out));
     let calls = std::fs::read_to_string(&log).unwrap();
     let start_at = calls.find("agent start w1 --kind claude --pane w1:p3");
-    let prompt_at = calls.find("agent prompt w1 pick up the follow-ups");
+    let prompt_at = calls.find("pick up the follow-ups");
     assert!(
         start_at.is_some(),
         "must restart the done pane first: {calls}"
     );
     assert!(prompt_at.is_some(), "{calls}");
     assert!(start_at < prompt_at, "revive before prompt: {calls}");
-}
-
-#[test]
-fn start_at_an_epic_boards_the_leaves() {
-    let store = fresh_dir("start-epic");
-    let base = store.parent().unwrap();
-    let log = base.join("epic-bd.log");
-    let stub = bd_stub(
-        base,
-        "bd-epic.sh",
-        &log,
-        r#"  ready) echo '[{"id":"bd-1.2","title":"Leaf A","parent":"bd-1"},{"id":"bd-1.3","title":"Leaf B","parent":"bd-1"}]' ;;
-  show) echo '{"id":"bd-1","title":"The epic","status":"open"}' ;;
-  *) echo '{}' ;;"#,
-    );
-    let out = Command::new(bin())
-        .args(["start", "--bead", "bd-1", "--no-herdr"])
-        .env("MURMUR_DIR", &store)
-        .env("MURMUR_BEADS", &stub)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("epic   bd-1"), "{}", stdout(&out));
-    let list = stdout(&murmur(&store, &["task", "list"]));
-    assert!(list.contains("bd-1.2"), "{list}");
-    assert!(list.contains("bd-1.3"), "{list}");
-    assert!(
-        !list
-            .lines()
-            .any(|l| l.split_whitespace().nth(1) == Some("bd-1")),
-        "the epic must not be takeable: {list}"
-    );
-}
-
-#[test]
-fn beads_sync_skips_parents_of_ready_children() {
-    let store = fresh_dir("beads-leaves");
-    let base = store.parent().unwrap();
-    let log = base.join("leaves-bd.log");
-    let stub = bd_stub(
-        base,
-        "bd-leaves.sh",
-        &log,
-        r#"  ready) echo '[{"id":"bd-1","title":"Epic"},{"id":"bd-1.2","title":"Leaf","parent":"bd-1"}]' ;;
-  *) echo '{}' ;;"#,
-    );
-    let out = Command::new(bin())
-        .args(["task", "sync", "beads"])
-        .env("MURMUR_DIR", &store)
-        .env("MURMUR_BEADS", &stub)
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
-    let list = stdout(&murmur(&store, &["task", "list"]));
-    let ids: Vec<&str> = list
-        .lines()
-        .filter_map(|l| l.split_whitespace().nth(1))
-        .collect();
-    assert!(ids.contains(&"bd-1.2"), "{list}");
-    assert!(
-        !ids.contains(&"bd-1"),
-        "epic must not land when a child is ready: {list}"
-    );
 }
 
 #[test]
@@ -1444,9 +553,9 @@ fn start_joins_agents_and_writes_herd_snap() {
 printf '%s\n' "$*" >> "{log}"
 case "$1 $2" in
   "status --json") echo '{{"server":{{"running":true}}}}' ;;
-  "agent list") echo '{{"result":{{"agents":[]}}}}' ;;
   "workspace create") echo '{{"result":{{"workspace":{{"workspace_id":"w9"}},"root_pane":{{"pane_id":"w9:p0"}}}}}}' ;;
   "pane split") echo '{{"result":{{"pane":{{"pane_id":"w9:p1"}}}}}}' ;;
+  "agent list") echo '{{"result":{{"agents":[]}}}}' ;;
   *) echo '{{"result":{{}}}}' ;;
 esac
 "#,
@@ -1473,7 +582,25 @@ esac
     assert_eq!(snap["workspace_id"], "w9");
     assert_eq!(snap["agents"][0], "lead");
     assert_eq!(snap["agents"][1], "w1");
-    let who = stdout(&murmur(&store, &["who"]));
+    // who is a view over herdr's live agents
+    std::fs::create_dir_all(base.join("who-stub")).unwrap();
+    let live = fake_herdr(
+        &base.join("who-stub"),
+        r#"#!/bin/sh
+case "$1 $2" in
+  "agent list") echo '{"result":{"agents":[{"name":"lead","agent":"grok","agent_status":"idle","pane_id":"w9:p1"},{"name":"w1","agent":"grok","agent_status":"working","pane_id":"w9:p2"}]}}' ;;
+  *) echo '{"result":{}}' ;;
+esac
+"#,
+    );
+    let who = stdout(
+        &Command::new(bin())
+            .args(["who"])
+            .env("MURMUR_DIR", &store)
+            .env("MURMUR_HERDR", &live)
+            .output()
+            .unwrap(),
+    );
     assert!(who.contains("lead"), "{who}");
     assert!(who.contains("w1"), "{who}");
 }
@@ -1482,8 +609,7 @@ esac
 fn stop_closes_workspace_and_clears_the_snap() {
     let store = fresh_dir("stop-herd");
     let base = store.parent().unwrap();
-    murmur(&store, &["join", "lead"]);
-    murmur(&store, &["join", "w1"]);
+    std::fs::create_dir_all(&store).unwrap();
     std::fs::write(
         store.join("herd.json"),
         r#"{"workspace_id":"w9","label":"bd-a1b2","agents":["lead","w1"]}"#,
@@ -1521,14 +647,12 @@ esac
     assert!(!store.join("herd.json").exists());
     let calls = std::fs::read_to_string(&log).unwrap();
     assert!(calls.contains("workspace close w9"), "{calls}");
-    let who = stdout(&murmur(&store, &["who"]));
-    assert!(!who.contains("lead"), "presence dropped: {who}");
 }
 
 #[test]
 fn stop_refuses_to_close_the_current_workspace() {
     let store = fresh_dir("stop-self");
-    murmur(&store, &["join", "lead"]);
+    std::fs::create_dir_all(&store).unwrap();
     std::fs::write(
         store.join("herd.json"),
         r#"{"workspace_id":"w9","label":"bd-a1b2","agents":["lead"]}"#,
@@ -1549,69 +673,23 @@ fn stop_refuses_to_close_the_current_workspace() {
 }
 
 #[test]
-fn herdr_idle_wake_prompts_once_per_message() {
-    let store = fresh_dir("wake");
-    murmur(&store, &["send", "lead", "please review", "--as", "alice"]);
-    let base = store.parent().unwrap();
-    let log = base.join("wake-herdr.log");
-    let stub = fake_herdr(
-        base,
-        &format!(
-            r#"#!/bin/sh
-printf '%s\n' "$*" >> "{log}"
-case "$1 $2" in
-  "agent get") echo '{{"result":{{"agent":{{"name":"lead","pane_id":"w1:p1","cwd":"."}}}}}}' ;;
-  "agent prompt") echo '{{"result":{{}}}}' ;;
-  "notification show") echo '{{"result":{{}}}}' ;;
-  "pane report-metadata") echo '{{"result":{{}}}}' ;;
-  *) echo '{{"result":{{}}}}' ;;
-esac
-"#,
-            log = log.display()
-        ),
-    );
-    let event = r#"{"event":"pane.agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w1:p1","workspace_id":"w1","agent_status":"idle"}}"#;
-    let run = || {
-        Command::new(bin())
-            .args(["herdr"])
-            .env("MURMUR_DIR", &store)
-            .env("MURMUR_HERDR", &stub)
-            .env("HERDR_ENV", "1")
-            .env("HERDR_PANE_ID", "w1:p1")
-            .env("HERDR_PLUGIN_EVENT_JSON", event)
-            .env("HERDR_PLUGIN_STATE_DIR", base.join("wake-state"))
-            .env_remove("MURMUR_BEADS")
-            .output()
-            .unwrap()
-    };
-    let out = run();
-    assert!(out.status.success(), "{}", stderr(&out));
-    let calls = std::fs::read_to_string(&log).unwrap();
-    assert!(calls.contains("agent prompt"), "{calls}");
-    assert!(
-        calls.contains("please review") || calls.contains("unread"),
-        "{calls}"
-    );
-    let before = calls.matches("agent prompt").count();
-    let out = run();
-    assert!(out.status.success(), "{}", stderr(&out));
-    let calls = std::fs::read_to_string(&log).unwrap();
-    assert_eq!(
-        calls.matches("agent prompt").count(),
-        before,
-        "must not re-prompt the same mail: {calls}"
-    );
-}
-
-#[test]
 fn herdr_idle_wake_revives_a_done_pane_with_mail() {
     // "Done" is not "idle": the model finished its turn and stopped
     // listening. New mail for a done pane must restart the agent before
     // the prompt, or the nudge lands on a corpse.
     let store = fresh_dir("wake-revive");
-    murmur(&store, &["join", "lead"]);
-    murmur(&store, &["send", "w1", "please review", "--as", "lead"]);
     let base = store.parent().unwrap();
+    // spool a tell while nobody is listening (prompt fails on this stub)
+    std::fs::create_dir_all(base.join("dead-stub")).unwrap();
+    let dead = fake_herdr(&base.join("dead-stub"), "#!/bin/sh\nexit 1\n");
+    let out = Command::new(bin())
+        .args(["tell", "w1", "please review", "--as", "lead"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &dead)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("spooled"), "{}", stdout(&out));
     let log = base.join("wake-revive-herdr.log");
     let stub = fake_herdr(
         base,
@@ -1648,9 +726,9 @@ esac
 }
 
 #[test]
-fn herdr_idle_wake_points_an_empty_inbox_at_ready_beads_once() {
+fn herdr_idle_wake_points_an_empty_spool_at_ready_beads_once() {
     let store = fresh_dir("wake-beads");
-    murmur(&store, &["join", "lead"]); // the plugin is a no-op without a store
+    std::fs::create_dir_all(&store).unwrap(); // the plugin is a no-op without a notebook
     let base = store.parent().unwrap();
     let log = base.join("wake-beads-herdr.log");
     let stub = fake_herdr(
@@ -1688,8 +766,8 @@ esac
     assert!(calls.contains("agent prompt"), "{calls}");
     assert!(calls.contains("bd-a1b2"), "names the ready bead: {calls}");
     assert!(
-        calls.contains("task sync beads"),
-        "points at the pull path: {calls}"
+        calls.contains("murmur assign"),
+        "points at the assignment verb: {calls}"
     );
     // same ready set → no re-prompt
     let before = calls.matches("agent prompt").count();
@@ -1842,11 +920,14 @@ esac
     // the lead's brief explains how to reach cloud peers
     let herdr_calls = std::fs::read_to_string(&herdr_log).unwrap();
     assert!(herdr_calls.contains("Cloud peers"), "{herdr_calls}");
-    // the launch id waits durably in the lead's inbox
-    let inbox = murmur(&store, &["inbox", "--as", "lead"]);
-    let mail = stdout(&inbox);
-    assert!(mail.contains("bc-test-1"), "{mail}");
-    assert!(mail.contains("murmur cloud prompt"), "{mail}");
+    // the launch note reaches the lead: prompted live, or spooled
+    let prompted = herdr_calls.contains("bc-test-1");
+    let spooled = store.join("spool").join("lead").is_dir()
+        && std::fs::read_dir(store.join("spool").join("lead"))
+            .unwrap()
+            .count()
+            > 0;
+    assert!(prompted || spooled, "launch note lost: {herdr_calls}");
 }
 
 #[test]
@@ -1973,94 +1054,6 @@ fn doctor_reads_cursor_key_from_dot_secrets() {
 // ---- 0.7: targeted takes, scoped sync, boards, restack, plan ----
 
 #[test]
-fn take_by_id_wins_once_and_refuses_epics() {
-    let store = fresh_dir("take-id");
-    write_task(&store, "todo", "bd-1", "epic");
-    write_task(&store, "todo", "bd-1.2", "leaf");
-    write_task(&store, "todo", "bd-9", "other leaf");
-
-    let out = murmur(&store, &["task", "take", "bd-9", "--as", "w1", "--json"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    let task: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
-    assert_eq!(
-        task["id"],
-        "bd-9",
-        "specific id, not oldest: {}",
-        stdout(&out)
-    );
-
-    let out = murmur(&store, &["task", "take", "bd-9", "--as", "w2"]);
-    assert!(
-        !out.status.success(),
-        "second taker must lose: {}",
-        stdout(&out)
-    );
-
-    let out = murmur(&store, &["task", "take", "bd-1", "--as", "w2"]);
-    assert!(!out.status.success(), "{}", stdout(&out));
-    assert!(stderr(&out).contains("epic"), "{}", stderr(&out));
-}
-
-#[test]
-fn sync_refuses_an_unscoped_flood_and_scopes_to_a_parent() {
-    let store = fresh_dir("sync-flood");
-    let base = store.parent().unwrap();
-    let log = base.join("flood-bd.log");
-    // 22 unrelated ready leaves plus one epic subtree
-    let mut ready: Vec<String> = (1..=22)
-        .map(|i| format!(r#"{{"id":"bd-x{i}","title":"leaf {i}"}}"#))
-        .collect();
-    ready.push(r#"{"id":"bd-1","title":"Epic"}"#.into());
-    ready.push(r#"{"id":"bd-1.2","title":"Mid","parent":"bd-1"}"#.into());
-    ready.push(r#"{"id":"bd-1.2.1","title":"Deep leaf","parent":"bd-1.2"}"#.into());
-    let stub = bd_stub(
-        base,
-        "bd-flood.sh",
-        &log,
-        &format!(
-            "  ready) echo '[{}]' ;;\n  *) echo '{{}}' ;;",
-            ready.join(",")
-        ),
-    );
-    let sync = |extra: &[&str]| {
-        let mut args = vec!["task", "sync", "beads"];
-        args.extend_from_slice(extra);
-        Command::new(bin())
-            .args(&args)
-            .env("MURMUR_DIR", &store)
-            .env("MURMUR_BEADS", &stub)
-            .output()
-            .unwrap()
-    };
-    // unscoped + big ready set: nothing lands, exit 0 (hook-safe)
-    let out = sync(&[]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("NOT pulling"), "{}", stdout(&out));
-    let list = stdout(&murmur(&store, &["task", "list"]));
-    assert!(!list.contains("bd-x1"), "guard must hold the flood: {list}");
-
-    // scoped to the epic: only its deep leaf lands
-    let out = sync(&["--parent", "bd-1"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    let list = stdout(&murmur(&store, &["task", "list"]));
-    assert!(list.contains("bd-1.2.1"), "{list}");
-    assert!(
-        !list.contains("bd-x1"),
-        "out-of-scope leaves stay out: {list}"
-    );
-    assert!(
-        !list.contains("todo   bd-1 "),
-        "the epic stays in beads: {list}"
-    );
-
-    // --all overrides the guard
-    let out = sync(&["--all"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    let list = stdout(&murmur(&store, &["task", "list"]));
-    assert!(list.contains("bd-x1"), "{list}");
-}
-
-#[test]
 fn start_board_gives_the_herd_its_own_bus() {
     let dir = fresh_dir("board-herd");
     std::fs::create_dir_all(&dir).unwrap();
@@ -2068,27 +1061,27 @@ fn start_board_gives_the_herd_its_own_bus() {
         .args([
             "start",
             "fix the shelves",
-            "--no-herdr",
+            "--kind",
+            "grok",
             "--board",
             "Oficina",
         ])
         .current_dir(&dir)
+        .env("PATH", "/usr/bin:/bin")
         .env_remove("MURMUR_DIR")
         .env_remove("MURMUR_BEADS")
+        .env_remove("MURMUR_HERDR")
         .env_remove("HERDR_ENV")
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", stderr(&out));
+    // no herdr → start refuses, but the named notebook was already scoped
+    assert!(!out.status.success());
     assert!(stdout(&out).contains(".murmur-oficina"), "{}", stdout(&out));
     let board = dir.join(".murmur-oficina");
-    assert!(board.is_dir(), "board store must exist");
-    let tasks = std::fs::read_dir(board.join("tasks").join("todo"))
-        .unwrap()
-        .count();
-    assert_eq!(tasks, 1, "the goal lands on the board's own bus");
+    assert!(board.is_dir(), "board notebook must exist");
     assert!(
         !dir.join(".murmur").exists(),
-        "the default bus must stay untouched"
+        "the default notebook must stay untouched"
     );
 }
 
@@ -2396,76 +1389,6 @@ esac
 }
 
 #[test]
-fn clean_stale_prunes_dead_herd_leftovers_but_not_the_bus() {
-    let store = fresh_dir("clean-stale");
-    murmur(&store, &["join", "fresh"]);
-    murmur(&store, &["send", "fresh", "keep me", "--as", "fresh2"]);
-    // a long-dead agent and an old done task
-    std::fs::write(
-        store.join("agents").join("old.json"),
-        r#"{"name":"old","pid":999999,"cwd":"","joined_at":1,"last_seen":1}"#,
-    )
-    .unwrap();
-    write_task(&store, "done", "bd-old", "finished ages ago");
-    let done = store.join("tasks").join("done").join("bd-old.json");
-    Command::new("touch")
-        .args(["-d", "2 days ago"])
-        .arg(&done)
-        .output()
-        .unwrap();
-
-    let out = murmur(&store, &["clean", "--stale"]);
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(stdout(&out).contains("1 stale agents"), "{}", stdout(&out));
-    assert!(
-        stdout(&out).contains("1 old done tasks"),
-        "{}",
-        stdout(&out)
-    );
-    assert!(!done.exists());
-    let who = stdout(&murmur(&store, &["who"]));
-    assert!(who.contains("fresh"), "live presence survives: {who}");
-    assert!(!who.contains("old"), "{who}");
-    let mail = stdout(&murmur(&store, &["inbox", "--as", "fresh"]));
-    assert!(mail.contains("keep me"), "the bus is untouched: {mail}");
-}
-
-#[test]
-fn who_reports_idle_between_commands_before_gone() {
-    let store = fresh_dir("who-idle");
-    murmur(&store, &["join", "seed"]); // creates the store
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    std::fs::write(
-        store.join("agents").join("recente.json"),
-        format!(
-            r#"{{"name":"recente","pid":999999,"cwd":"","joined_at":1,"last_seen":{}}}"#,
-            now - 30
-        ),
-    )
-    .unwrap();
-    std::fs::write(
-        store.join("agents").join("velho.json"),
-        r#"{"name":"velho","pid":999999,"cwd":"","joined_at":1,"last_seen":1}"#,
-    )
-    .unwrap();
-    let who = stdout(&murmur(&store, &["who"]));
-    let line = |n: &str| {
-        who.lines()
-            .find(|l| l.starts_with(n))
-            .unwrap_or("")
-            .to_string()
-    };
-    assert!(
-        line("recente").contains("idle"),
-        "recently seen != dead: {who}"
-    );
-    assert!(line("velho").contains("gone"), "{who}");
-}
-
-#[test]
 fn fleet_records_starts_and_reports_usage() {
     let store = fresh_dir("fleet-usage");
     let base = store.parent().unwrap();
@@ -2511,7 +1434,7 @@ esac
 }
 
 #[test]
-fn agents_md_contract_assigns_by_id_and_never_syncs_wholesale() {
+fn agents_md_contract_teaches_the_wave_verbs() {
     let dir = fresh_dir("agents-md");
     std::fs::create_dir_all(&dir).unwrap();
     let out = Command::new(bin())
@@ -2523,12 +1446,12 @@ fn agents_md_contract_assigns_by_id_and_never_syncs_wholesale() {
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
     let text = std::fs::read_to_string(dir.join("AGENTS.md")).unwrap();
-    assert!(text.contains("murmur task take <id>"), "{text}");
-    assert!(text.contains("Never sync the tracker wholesale"), "{text}");
-    assert!(text.contains("FLEET.md"), "{text}");
+    assert!(text.contains("Assignments arrive as prompts"), "{text}");
+    assert!(text.contains("murmur tell"), "{text}");
+    assert!(text.contains("murmur done <bead>"), "{text}");
     assert!(
-        !text.contains("assigns you\nthe oldest"),
-        "the oldest-open recipe is gone: {text}"
+        !text.contains("task take") && !text.contains("murmur inbox"),
+        "the board-era recipes are gone: {text}"
     );
 }
 
@@ -2555,40 +1478,42 @@ fn worktrees_resolve_to_the_main_checkouts_store() {
     git(&["worktree", "add", "-q", "../repo--wt", "-b", "wt"]);
     let wt = base.join("repo--wt");
 
-    // join from the worktree with NO MURMUR_DIR: the store must land in
-    // the main checkout, never as a stray copy in the worktree
+    // tell from the worktree with NO MURMUR_DIR and no herdr: the spool
+    // must land in the main checkout, never as a stray copy in the worktree
+    std::fs::create_dir_all(base.join("wt-dead")).unwrap();
+    let dead = fake_herdr(&base.join("wt-dead"), "#!/bin/sh\nexit 1\n");
     let out = Command::new(bin())
-        .args(["join", "wtworker"])
+        .args(["tell", "wtworker", "hello", "--as", "mainside"])
         .current_dir(&wt)
+        .env("MURMUR_HERDR", &dead)
         .env_remove("MURMUR_DIR")
         .env_remove("HERDR_ENV")
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(
-        repo.join(".murmur/agents/wtworker.json").exists(),
-        "store anchored to the repo"
+        repo.join(".murmur/spool/wtworker").is_dir(),
+        "notebook anchored to the repo"
     );
     assert!(
         !wt.join(".murmur").exists(),
-        "no stray store in the worktree"
+        "no stray notebook in the worktree"
     );
 
-    // mail sent from the main checkout is readable from the worktree
+    // a tell spooled from the main checkout is the same file the worktree
+    // side sees — one notebook for the whole repo
     let out = Command::new(bin())
-        .args(["send", "wtworker", "one bus", "--as", "mainside"])
+        .args(["tell", "wtworker", "one bus", "--as", "mainside"])
         .current_dir(&repo)
+        .env("MURMUR_HERDR", &dead)
         .env_remove("MURMUR_DIR")
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", stderr(&out));
-    let out = Command::new(bin())
-        .args(["inbox", "--as", "wtworker"])
-        .current_dir(&wt)
-        .env_remove("MURMUR_DIR")
-        .output()
-        .unwrap();
-    assert!(stdout(&out).contains("one bus"), "{}", stdout(&out));
+    let spooled = std::fs::read_dir(repo.join(".murmur/spool/wtworker"))
+        .unwrap()
+        .count();
+    assert_eq!(spooled, 2, "both tells share one spool");
 }
 
 #[test]
@@ -2614,7 +1539,7 @@ fn setup_seeds_role_playbook_skills_idempotently() {
     assert!(text.contains("murmur restack"), "{text}");
     assert!(std::fs::read_to_string(&worker)
         .unwrap()
-        .contains("Report to lead and STOP"));
+        .contains("Close it, report anything surprising, and STOP"));
     let out = run();
     assert!(stdout(&out).contains("already present"), "{}", stdout(&out));
 
@@ -2687,7 +1612,7 @@ esac
 }
 
 #[test]
-fn briefs_are_durable_and_poke_redelivers_them() {
+fn briefs_are_durable_and_tell_redelivers_them() {
     // A login picker or trust dialog can eat the first brief even when the
     // pane reports interactive-ready (observed against real herdr 0.8.2).
     // The brief is stored at start; poke --brief re-delivers it.
@@ -2725,7 +1650,7 @@ esac
     assert!(saved.contains("you are agent 'lead'"), "{saved}");
 
     let out = Command::new(bin())
-        .args(["poke", "lead", "--brief"])
+        .args(["tell", "lead", "--brief"])
         .env("MURMUR_DIR", &store)
         .env("MURMUR_HERDR", &stub)
         .output()
@@ -2740,11 +1665,237 @@ esac
 
     // no message and no --brief is an error, not a silent no-op
     let out = Command::new(bin())
-        .args(["poke", "lead"])
+        .args(["tell", "lead"])
         .env("MURMUR_DIR", &store)
         .env("MURMUR_HERDR", &stub)
         .output()
         .unwrap();
     assert!(!out.status.success());
     assert!(stderr(&out).contains("--brief"), "{}", stderr(&out));
+}
+
+#[test]
+fn tell_spools_when_nobody_listens_and_the_wake_delivers_once() {
+    let store = fresh_dir("tell-spool");
+    let base = store.parent().unwrap();
+    std::fs::create_dir_all(base.join("dead")).unwrap();
+    let dead = fake_herdr(&base.join("dead"), "#!/bin/sh\nexit 1\n");
+    let out = Command::new(bin())
+        .args(["tell", "w1", "rebase onto main", "--as", "lead"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_HERDR", &dead)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("spooled for w1"), "{}", stdout(&out));
+    assert_eq!(
+        std::fs::read_dir(store.join("spool/w1")).unwrap().count(),
+        1,
+        "one spooled tell"
+    );
+
+    // the idle-wake drains the spool into one prompt and empties it
+    let log = base.join("tell-wake.log");
+    let live = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "agent get") echo '{{"result":{{"agent":{{"name":"w1","agent":"grok","pane_id":"w1:p2","cwd":".","agent_status":"idle"}}}}}}' ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = log.display()
+        ),
+    );
+    let event = r#"{"event":"pane.agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w1:p2","workspace_id":"w1","agent_status":"idle"}}"#;
+    let wake = || {
+        Command::new(bin())
+            .args(["herdr"])
+            .env("MURMUR_DIR", &store)
+            .env("MURMUR_HERDR", &live)
+            .env("HERDR_ENV", "1")
+            .env("HERDR_PANE_ID", "w1:p2")
+            .env("HERDR_PLUGIN_EVENT_JSON", event)
+            .env("HERDR_PLUGIN_STATE_DIR", base.join("tell-wake-state"))
+            .env_remove("MURMUR_BEADS")
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap()
+    };
+    let out = wake();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains("from lead: rebase onto main"), "{calls}");
+    assert_eq!(
+        std::fs::read_dir(store.join("spool/w1")).unwrap().count(),
+        0,
+        "spool drained"
+    );
+    let before = calls.matches("agent prompt").count();
+    let out = wake();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls.matches("agent prompt").count(),
+        before,
+        "an empty spool must not re-prompt: {calls}"
+    );
+}
+
+#[test]
+fn assign_sets_the_bead_and_hands_the_slice() {
+    let store = fresh_dir("assign");
+    let base = store.parent().unwrap();
+    let bd_log = base.join("assign-bd.log");
+    let bd = fake_bd(base, &bd_log);
+    let herdr_log = base.join("assign-herdr.log");
+    let stub = fake_herdr(
+        base,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "{log}"
+case "$1 $2" in
+  "agent get") echo '{{"result":{{"agent":{{"name":"w1","agent":"grok","pane_id":"w1:p2","agent_status":"idle"}}}}}}' ;;
+  *) echo '{{"result":{{}}}}' ;;
+esac
+"#,
+            log = herdr_log.display()
+        ),
+    );
+    let out = Command::new(bin())
+        .args([
+            "assign",
+            "bd-a1b2",
+            "w1",
+            "--as",
+            "lead",
+            "--note",
+            "watch the flaky test",
+        ])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_BEADS", &bd)
+        .env("MURMUR_HERDR", &stub)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("assigned bd-a1b2 to w1"),
+        "{}",
+        stdout(&out)
+    );
+    let bd_calls = std::fs::read_to_string(&bd_log).unwrap();
+    assert!(
+        bd_calls.contains("update bd-a1b2 --status in_progress --assignee w1 --json"),
+        "the bead carries the assignment: {bd_calls}"
+    );
+    let herdr_calls = std::fs::read_to_string(&herdr_log).unwrap();
+    assert!(herdr_calls.contains("[assigned] bd-a1b2"), "{herdr_calls}");
+    assert!(
+        herdr_calls.contains("watch the flaky test"),
+        "the note rides along: {herdr_calls}"
+    );
+    assert!(
+        herdr_calls.contains("murmur done bd-a1b2"),
+        "the worker learns how to finish: {herdr_calls}"
+    );
+}
+
+#[test]
+fn assign_refuses_a_closed_bead() {
+    let store = fresh_dir("assign-closed");
+    let base = store.parent().unwrap();
+    let log = base.join("assign-closed-bd.log");
+    let bd = bd_stub(
+        base,
+        "bd-closed.sh",
+        &log,
+        r#"  show) echo '{"id":"bd-a1b2","title":"t","status":"closed"}' ;;
+  *) echo '{}' ;;"#,
+    );
+    let out = Command::new(bin())
+        .args(["assign", "bd-a1b2", "w1"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_BEADS", &bd)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("already closed"), "{}", stderr(&out));
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(!calls.contains("update"), "no assignment pushed: {calls}");
+}
+
+#[test]
+fn done_closes_with_attribution_and_tells_the_lead() {
+    let store = fresh_dir("done");
+    let base = store.parent().unwrap();
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(
+        store.join("herd.json"),
+        r#"{"workspace_id":"w9","label":"wave","agents":["lead","w1"]}"#,
+    )
+    .unwrap();
+    let bd_log = base.join("done-bd.log");
+    let bd = fake_bd(base, &bd_log);
+    std::fs::create_dir_all(base.join("done-dead")).unwrap();
+    let dead = fake_herdr(&base.join("done-dead"), "#!/bin/sh\nexit 1\n");
+    let out = Command::new(bin())
+        .args([
+            "done",
+            "bd-a1b2",
+            "--as",
+            "w1",
+            "--note",
+            "shelves render live",
+        ])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_BEADS", &bd)
+        .env("MURMUR_HERDR", &dead)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let bd_calls = std::fs::read_to_string(&bd_log).unwrap();
+    assert!(bd_calls.contains("close bd-a1b2 --reason"), "{bd_calls}");
+    assert!(
+        bd_calls.contains("closed by w1 via murmur"),
+        "attribution rides the close: {bd_calls}"
+    );
+    // the lead hears it — spooled, since nobody is listening
+    let spooled = std::fs::read_dir(store.join("spool/lead")).unwrap().count();
+    assert_eq!(spooled, 1, "lead told about the close");
+}
+
+#[test]
+fn drop_reopens_and_tells_the_lead() {
+    let store = fresh_dir("drop");
+    let base = store.parent().unwrap();
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(
+        store.join("herd.json"),
+        r#"{"workspace_id":"w9","label":"wave","agents":["lead","w1"]}"#,
+    )
+    .unwrap();
+    let bd_log = base.join("drop-bd.log");
+    let bd = fake_bd(base, &bd_log);
+    std::fs::create_dir_all(base.join("drop-dead")).unwrap();
+    let dead = fake_herdr(&base.join("drop-dead"), "#!/bin/sh\nexit 1\n");
+    let out = Command::new(bin())
+        .args(["drop", "bd-a1b2", "--as", "w1"])
+        .env("MURMUR_DIR", &store)
+        .env("MURMUR_BEADS", &bd)
+        .env("MURMUR_HERDR", &dead)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let bd_calls = std::fs::read_to_string(&bd_log).unwrap();
+    assert!(
+        bd_calls.contains("update bd-a1b2 --status open"),
+        "{bd_calls}"
+    );
+    assert_eq!(
+        std::fs::read_dir(store.join("spool/lead")).unwrap().count(),
+        1,
+        "lead told to reassign"
+    );
 }

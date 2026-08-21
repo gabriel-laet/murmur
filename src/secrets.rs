@@ -9,10 +9,6 @@
 
 use anyhow::{bail, Context, Result};
 
-pub fn contains_ref(text: &str) -> bool {
-    text.contains("secret://")
-}
-
 pub fn resolve(reference: &str) -> Result<String> {
     let rest = reference.strip_prefix("secret://").with_context(|| {
         format!(

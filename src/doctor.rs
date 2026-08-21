@@ -18,12 +18,14 @@ pub fn run() -> Result<()> {
     if herdr_up {
         println!("ok    herdr server running");
     } else {
-        println!("warn  herdr not running — local kinds have no panes to spawn into");
+        println!("miss  herdr not running — murmur requires it (panes, presence, delivery)");
     }
     if beads::available() {
         println!("ok    beads (bd) on PATH");
     } else {
-        println!("warn  beads (bd) not on PATH — durable tracker (optional)");
+        println!(
+            "warn  beads (bd) not on PATH — plan/assign/done need it; goal-string waves still run"
+        );
     }
 
     let Some(path) = fleet::find() else {
